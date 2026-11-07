@@ -17,7 +17,7 @@ Testing AI agents is different from testing traditional software:
 - **Cost per test** — LLM-as-judge evaluation costs money on every run
 - **Framework fragmentation** — Teams use OpenAI, LangChain, CrewAI, Google ADK — each with different tracing formats
 
-Most existing tools solve this by throwing an LLM judge at everything. That's expensive, slow, and flaky. Attest takes a different approach: **check what you can deterministically first, then escalate**.
+Output checks, behavior contracts and model judges answer different questions. Attest orders its checks so that deterministic assertions can run before a model judge is used for subjective criteria.
 
 ## How It Works
 
@@ -96,10 +96,10 @@ The engine is a single static binary — no runtime dependencies, no containers.
 
 ## Version
 
-Current release: **1.0.0** (SDK and engine), stable.
+Current stable release: **1.1.0 "Hardened"** (SDK and engine). Each SDK requires an engine of the same version.
 
 | Package | Registry | Install |
 |---------|----------|---------|
-| `attest-ai` | PyPI | `uv add "attest-ai>=1.0.0"` |
-| `@attest-ai/core` | npm | `npm install -D "@attest-ai/core@>=1.0.0"` |
-| `@attest-ai/vitest` | npm | `npm install -D "@attest-ai/vitest@>=1.0.0"` |
+| `attest-ai` | PyPI | `uv add "attest-ai==1.1.0"` |
+| `@attest-ai/core` | npm | `npm install -D "@attest-ai/core@1.1.0"` |
+| `@attest-ai/vitest` | npm | `npm install -D "@attest-ai/vitest@1.1.0"` |

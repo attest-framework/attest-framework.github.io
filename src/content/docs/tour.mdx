@@ -3,9 +3,9 @@ title: "Tour: from incident to regression test"
 description: The full INC-1042 walk-through — capture a real incident, replay the agent in CI with zero model calls, and gate the merge on the verdict.
 ---
 
-A real run or incident becomes a verified fixture with `attest capture`. PR CI replays your agent's real code against that fixture with zero model calls and returns one of three results to a policy gate: **pass**, **fail**, or **not evaluated** with a reason. It works the same in Python and TypeScript.
+`attest capture` records a run or incident as a fixture and checks that its drafted contracts are consistent with the recording. This does not establish that the recorded behavior is correct; choose independent invariants for that. Strict replay runs your agent's real code against the recorded model responses with zero live model calls for matching requests. Checks report **pass**, **fail**, or **not evaluated** with a reason; a policy determines which results block. Python and TypeScript support this workflow.
 
-The walk-through below follows one story from [refund-desk](https://github.com/attest-framework/refund-desk), a synthetic demo: a support agent refunds a customer twice after a payment timeout (INC-1042). No paid model API is called anywhere, and every command and output on this page is copied from the demo or from the linked guides. The demo installs attest `1.0.0`; the commands below use `uv run attest` for Python and `npx attest` for TypeScript.
+The walk-through below follows one story from [refund-desk](https://github.com/attest-framework/refund-desk), a synthetic demo: a support agent refunds a customer twice after a payment timeout (INC-1042). It uses a scripted model server rather than a paid model API. The commands and outputs illustrate the demo; consult its README for the current released-channel pin and executable walkthrough. The commands below use `uv run attest` for Python and `npx attest` for TypeScript.
 
 ### 1. The incident
 

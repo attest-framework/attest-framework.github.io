@@ -1,9 +1,9 @@
 ---
 title: Attest
-description: Turn a real agent run or incident into a verified fixture, replay the agent's real code in PR CI with zero model calls, and gate merges on pass, fail or not evaluated.
+description: Capture a run as a fixture consistent with its recording, replay the agent's real code with recorded model responses, and apply a merge policy to the results.
 template: splash
 hero:
-  tagline: Record the incident once. Replay your agent's real code in CI with zero model calls. Gate the merge on the verdict.
+  tagline: Record the incident once. Replay your agent's real code against recorded model responses. Gate the merge on the checks you chose.
   image:
     file: ../../assets/logo.svg
   actions:
@@ -28,23 +28,23 @@ import ComparisonTable from '@components/ComparisonTable.astro';
 
 ## rec → replay → gate
 
-A support agent refunded a customer twice after a payment timeout. Its tests stayed green, because they only checked the reply text. That incident — [INC-1042](https://github.com/attest-framework/refund-desk/issues/2) — becomes a regression test in three moves:
+A support agent refunded a customer twice after a payment timeout. Its output-only tests stayed green. That synthetic incident — [INC-1042](https://github.com/attest-framework/refund-desk/issues/2) — becomes a regression test in three moves:
 
 <div class="story-strip">
   <div class="story-step rec">
     <span class="step-glyph">● rec</span>
     <h3>Capture the incident</h3>
-    <p><code>attest capture</code> runs the agent once and records its trace and every model exchange as a verified fixture — secrets removed, contracts drafted from the run.</p>
+    <p><code>attest capture</code> records the trace and model exchanges, applies redaction and drafts contracts from the run. A fixture marked consistent with the recording is not proof that the behavior is correct: review the fixture and choose independent business invariants.</p>
   </div>
   <div class="story-step play">
     <span class="step-glyph">▶ replay</span>
     <h3>Replay in CI</h3>
-    <p>PR CI replays your agent's real code against the fixture through a local proxy. No provider keys, zero model calls, <code>$0.00</code> — and no flaky suites.</p>
+    <p>Strict replay runs your agent's real code against recorded model responses through a local proxy, with zero live model calls for matching requests. It removes live-model variability, not other sources of flaky tests; tool dependencies and test isolation still need control.</p>
   </div>
   <div class="story-step gate">
     <span class="step-glyph">✓ gate</span>
     <h3>Gate the merge</h3>
-    <p>Every check ends as <span class="verdict pass">pass</span> <span class="verdict fail">fail</span> or <span class="verdict skip">not_evaluated</span> with a reason. The policy exits non-zero and the regression never merges.</p>
+    <p>Checks report <span class="verdict pass">pass</span>, <span class="verdict fail">fail</span> or <span class="verdict skip">not_evaluated</span> with a reason. Configure the policy to block the failures and missing verdicts that matter, then require that check in branch protection. The gate covers the contracts and baselines you supply, not every possible regression.</p>
   </div>
 </div>
 
@@ -130,8 +130,8 @@ test('weather agent returns weather data', async () => {
   const chain = attestExpect(result)
     .requiredTools(['get_weather'])                               // Layer 3: Free
     .outputContains('Tokyo')                                      // Layer 4: Free
-    .outputSimilarTo('Current weather conditions in Tokyo')       // Layer 5: ≪$0.001
-    .passesJudge('Provides accurate, helpful weather information'); // Layer 6: ~$0.001
+    .outputSimilarTo('Current weather conditions in Tokyo')       // Layer 5: cost depends on the embedding provider
+    .passesJudge('Provides accurate, helpful weather information'); // Layer 6: cost depends on the judge provider
 
   await evaluate(chain);
 });
@@ -164,10 +164,10 @@ test('weather agent returns weather data', async () => {
 
 ```bash
 # Python
-uv add "attest-ai>=1.0.0"
+uv add "attest-ai==1.1.0"
 
 # TypeScript
-npm install -D "@attest-ai/core@>=1.0.0" "@attest-ai/vitest@>=1.0.0" "vitest@^4"
+npm install -D "@attest-ai/core@1.1.0" "@attest-ai/vitest@1.1.0" "vitest@^4"
 ```
 
 Check the [Python quickstart](/getting-started/python/) or [TypeScript quickstart](/getting-started/typescript/) for a complete walkthrough.
