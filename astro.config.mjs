@@ -246,6 +246,7 @@ export default defineConfig({
         {
           label: "Blog",
           items: [
+            { label: "v1.1.0 Hardened", slug: "blog/v110-release" },
             { label: "v0.6.0 Release", slug: "blog/v060-release" },
             { label: "v0.5.0 Release", slug: "blog/v050-release" },
             { label: "v0.4.2 Release", slug: "blog/v042-release" },

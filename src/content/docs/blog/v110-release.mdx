@@ -1,0 +1,101 @@
+---
+title: "Attest 1.1 — Hardened Checks, Effects and Merge Gates"
+description: "What changes in 1.1.0: evaluated chains, relational effects, baseline gates and failed-test policy, with two synthetic incidents and a benchmark that includes its misses."
+---
+
+Attest 1.1.0 "Hardened" tightens the path from an incident recording to a required CI check. The changes focus on three questions: did the test evaluate its assertions, did it check the effects that matter, and did the merge policy account for the result?
+
+For Python and TypeScript users, this means stricter assertion-chain enforcement, relational checks over world state, baseline removal checks, explicit judge failure reasons and a policy rule for failed native tests. Several suites that passed on earlier versions will fail until their tests or baselines are updated. This post summarizes the changes recorded in [1.1.0-rc.1 through rc.5][changelog], which form the 1.1 release.
+
+## Evaluate the checks you build
+
+An assertion chain is a description of checks, not an evaluation. With the pytest and Vitest integrations, building a chain without evaluating it fails the test; evaluating an empty chain also fails. After adding assertions to an evaluated chain, evaluate it again. The guard covers pytest fixture setup and teardown as well as test bodies, and attributes fixture chains to the test executing that phase.
+
+In Vitest, isolated concurrent test bodies own their chains: evaluating a chain in one test does not satisfy another test's guard. There are compatibility limits. Unscoped concurrent lifecycle assertions on Vitest below 4.1 fail with guidance to move them into the test body or upgrade. Cached, non-isolated concurrent files fail explicitly when the necessary guard hooks are unavailable. These are changes to test enforcement, not evidence that a test's assertions are sufficient. [Sources: rc.1 and rc.5][changelog]
+
+Policy evaluation now blocks reports containing failed native tests through `tests_failed`, even when their Attest assertion rows passed. Vitest suite/module `beforeAll` and `afterAll` errors are reported as failures of collected descendant tests. Report-v2 input with missing or null `tests`, or an outcome outside `passed|failed|skipped`, is an input error with exit code 3. `tests_failed: warn` and `tests_failed: off` are explicit ways to make that rule non-blocking. [Source: rc.5][changelog]
+
+## Check the ledger, not only the reply
+
+[Refund Desk][refund-desk] contains two synthetic incidents in Python and TypeScript. The customers, orders and payments are invented; the demos use a scripted model server rather than a paid model API.
+
+| Incident | What went wrong | What the regression check needs |
+|---|---|---|
+| [INC-1042][inc1042] | A payment committed before its response timed out. The agent retried without an idempotency key: two $84 refunds for an $84 order, while its reply described one refund. | A per-order tool-call cardinality check, plus an effect check over the refund ledger. |
+| [INC-1077][inc1077] | Partial-refund support allowed two refunds. A $12 shipping refund followed by a $126 full refund produced $138 against a $126 order. The confirmation went to a customer looked up earlier in the session. | Relational checks that the refund total is within the order amount and the notification recipient matches the order's customer. |
+
+A call-count limit alone does not encode the second incident's business rules. In 1.1, effect assertions support `sum` and `matches`, with `related()` referring to a field on a joined resource. Both SDKs expose these checks. Capture and MCP contract drafting can propose them from a captured world. `attest capture --expect-fail` records the incident's contract violations as expected failures. [Source: rc.4][changelog]
+
+The demos include two deliberately unsafe pull requests, both **closed unmerged**:
+
+- [refund-desk #36][pr36] reintroduced the INC-1077 over-refund and wrong recipient in both agents. Its [policy summary][pr36-summary] reports `block_on_regression` in Python and TypeScript, with effect failures for `13800 > 12600` cents and customer `C-0311` versus `C-0744`.
+- [refund-desk #37][pr37] removed the refund-sum contract while leaving the agent unchanged. The remaining live and replay tests passed, but its [policy summary][pr37-summary] reports `block_on_removal` across all four report/baseline pairs.
+
+Those PRs demonstrate the configured gates for these changes. They do not establish that the suite catches unrelated defects, or that a repository without the same policy and required checks has the same protection.
+
+## A recording is evidence, not a correctness certificate
+
+Capture describes a fixture as **consistent with the recording**. A double-refund recording can be internally consistent. Review the recorded data and select business invariants independently; drafted contracts describe observations and can encode an unnecessarily strict rule.
+
+Strict replay runs the current agent code with recorded model responses. Matching requests make zero live model calls; a mismatch fails rather than supplying a newly generated answer. Replay preserves relative email-identity roles across a session: changing a notification recipient relative to the looked-up identity can cause a miss, while consistently substituting one address throughout can still match. This is not a check of an absolute customer address. [Source: rc.1][changelog]
+
+`attest capture --refresh` now prints a semantic diff of prompt lines, tool schemas, messages, tool results, model and parameters, or reports no semantic change. Review that diff before accepting a new recording. The shipped capture guidance asks for human confirmation of the recorded command before refreshing it. Redaction handling also expands to additional credential formats and server-sent events; inspect fixtures before sharing them. [Sources: rc.2 and rc.4][changelog]
+
+Replay removes live-model variability, not failures in tools, time-dependent code or test isolation. Its zero-model-call property is scoped to the replayed requests, not a promise that an entire application or CI run is free.
+
+## Measured detection, including the misses
+
+The public [attest-bench results][bench-results] measure a 65-run synthetic Refund Desk corpus: 47 labeled faulty runs and 18 clean runs. These are the committed measurements, not a new benchmark of the final 1.1.0 binary. The [benchmark README][bench-readme] identifies the engine as `1.1.0-rc.3` built from attest commit `2e59fd6`; the released rc.3 binary does not support the relational fixtures, so the harness uses that source-build pin.
+
+| Approach | Faulty runs flagged (true-positive rate) | Clean runs flagged (false-positive rate) | Model cost (USD) | Model calls |
+|---|---|---|---|---|
+| Attest contracts + effects | 19/47 (40.4%) | 3/18 (16.7%) | $0.00 | 0 |
+| pytest + cassette, output assertions | 12/47 (25.5%) | 3/18 (16.7%) | $0.00 | 0 |
+| Either approach flags | 31/47 (66.0%) | 6/18 (33.3%) | $0.00 | 0 |
+| Judge-only | Not run | Not run | Not run | Not run |
+
+The contracts flag both incident recordings but miss all 15 output-only faults. The output assertions flag 12 of those 15 faults but miss both incidents. Combining these particular check sets increases detection and also increases false positives. That is evidence for checking different parts of the run, not a general ranking of tools.
+
+The limits are part of the result:
+
+- One scripted agent supplies this small, author-selected corpus. Contracts were drafted after the incidents were known; these are not unseen production incidents.
+- The output comparator is a hand-written VCR-style cassette harness, not a run of `vcrpy` or a competitor. Mutant replies are held unchanged, which explains the output comparator's 0/30 on behavior mutants.
+- Seven of the 30 mutants edit seeded order data that the agent does not write. On the remaining 23 agent-behavior mutants, the contracts flag 11/23, rather than 17/30 for the combined mutant group.
+- A benign repeated lookup breaks a drafted at-most-once contract. A harmless reply rewording breaks the output phrase match. Each produces three clean-run flags in its approach.
+- The $0.00 and zero-call rows describe offline evaluation of recorded runs, not the cost of collecting production traces. Judge-only was not run, and no competitor was measured.
+
+The benchmark supports a narrow conclusion: the supplied behavior/effect checks detect failures that these output checks miss, and vice versa. It does not measure production accuracy or a percentage of an agent's testable surface. [Sources: results and stated limitations][bench-readme]
+
+`attest mutate --json` also exposes generated, killed, survived and not-applicable counts per operator, plus exclusions. Inspecting survivors helps identify missing invariants; a mutation score is not a correctness guarantee. [Source: rc.4][changelog]
+
+## Judge failures and supply-chain checks
+
+A judge reply with a missing, non-numeric or out-of-range score becomes `not_evaluated(judge_malformed)`. Provider 401/403 responses become `not_evaluated(provider_auth)` after one call; transient failures use selective retries. That distinguishes an unavailable measurement from a measured score. **It does not make missing measurements block by default:** configure `not_evaluated: block` when the gate requires them. [Source: rc.1][changelog]; see the [policy defaults][policies].
+
+SDK downloads check engine binaries against hashes embedded in the Python wheel or npm package. Release engine binaries carry GitHub build-provenance attestations. The core repository and the `attest init --ci github` scaffold pin action references to commit SHAs; the scaffold separates read-only test execution from the pull-request-write annotation job. These controls address artifact and workflow integrity, not the adequacy of application contracts. [Sources: rc.1 and rc.3][changelog]
+
+Runner and adapter fixes include Vitest 3–5 support, working setup/reporter subpaths, Python metadata merging, provider tool-call object handling, and packaged npm installation guides. Adapter output shapes changed in some cases; consult the upgrade notes if tests assert the old shapes. [Sources: rc.1, rc.2, rc.3 and rc.5][changelog]
+
+## Upgrade checklist
+
+1. **Install matching SDK and engine versions.** Use `attest-ai==1.1.0` for Python, or `@attest-ai/core@1.1.0` and `@attest-ai/vitest@1.1.0` for TypeScript. An SDK requires the engine of the same version. For source/editable installs, build with `make engine` and set `ATTEST_ENGINE_PATH`; those installs do not auto-download an engine.
+2. **Re-pin baselines from 1.0.x.** Assertion ids use scheme 2 (`a2_` plus 32 hex characters); scheme-1 baseline comparisons exit 3. History ids also change, so drift history rebuilds over subsequent runs.
+3. **Re-pin effect baselines from rc.3 or earlier and regenerate reports.** Effect identity excludes the runtime world snapshot. Comparisons reject legacy effect identities missing `effect_world_excluded: true` with exit 3. The id scheme remains 2; non-effect-only legacy comparisons remain compatible. Review the new baseline before accepting it.
+4. **Evaluate each chain, including after appending assertions.** Check fixture-created chains and concurrent Vitest code. Move unscoped concurrent lifecycle assertions into the body or use Vitest 4.1 or later; consult the documented non-isolated-file guard limits.
+5. **Account for native test failures.** `tests_failed` blocks by default. Use `warn` or `off` only when a non-blocking policy is intended. Supply complete report-v2 test outcomes.
+6. **Review removals and missing verdicts.** With a baseline, `block_on_removal` blocks missing assertion ids by default; `allow_removed` lists accepted removals. A spec edit has a new identity and is reported as changed rather than automatically blocked. Set the `not_evaluated` policy deliberately and require the gate in branch protection.
+7. **Update affected integrations.** TypeScript `ATTEST_ENGINE_TIMEOUT` is in seconds, with values above 3600 refused. Replace the removed `AttestCostReporter` with `AttestReporter` through `@attest-ai/vitest/reporter`. Review OpenAI tool-argument/refusal shapes, TypeScript LangChain callbacks and CrewAI summary-only traces. Continuous-eval runners require a name; TypeScript `stop()` is asynchronous.
+
+The detailed behavior changes and remedies are in the [rc.1–rc.5 changelog][changelog]. To see the two incident stories rather than a standalone assertion, follow the [Refund Desk README][refund-desk] and its released-channel walkthrough. Review its prerequisites and current pin before running it.
+
+[changelog]: https://github.com/attest-framework/attest/blob/v1.1.0/CHANGELOG.md
+[policies]: https://github.com/attest-framework/attest/blob/v1.1.0/docs/guides/policies.md
+[refund-desk]: https://github.com/attest-framework/refund-desk#readme
+[inc1042]: https://github.com/attest-framework/refund-desk/issues/2
+[inc1077]: https://github.com/attest-framework/refund-desk/issues/34
+[pr36]: https://github.com/attest-framework/refund-desk/pull/36
+[pr37]: https://github.com/attest-framework/refund-desk/pull/37
+[pr36-summary]: https://github.com/attest-framework/refund-desk/pull/36#issuecomment-6694144422
+[pr37-summary]: https://github.com/attest-framework/refund-desk/pull/37#issuecomment-6693826501
+[bench-results]: https://github.com/attest-framework/attest-bench/blob/bbee6ab9e99b2cfa7295db8f4bcc1215b0dba353/corpus-bench/published/results.md
+[bench-readme]: https://github.com/attest-framework/attest-bench/blob/bbee6ab9e99b2cfa7295db8f4bcc1215b0dba353/README.md#fault-corpus-benchmark
