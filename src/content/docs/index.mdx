@@ -44,11 +44,11 @@ A support agent refunded a customer twice after a payment timeout. Its output-on
   <div class="story-step gate">
     <span class="step-glyph">✓ gate</span>
     <h3>Gate the merge</h3>
-    <p>Checks report <span class="verdict pass">pass</span>, <span class="verdict fail">fail</span> or <span class="verdict skip">not_evaluated</span> with a reason. Configure the policy to block the failures and missing verdicts that matter, then require that check in branch protection. The gate covers the contracts and baselines you supply, not every possible regression.</p>
+    <p>Checks report <span class="verdict pass">pass</span>, <span class="verdict fail">fail</span> or <span class="verdict skip">not_evaluated</span> with a reason. Failed tests block by default (<code>tests_failed: block</code>); <code>not_evaluated</code> warns unless the policy sets <code>not_evaluated: block</code>. Require the policy check in branch protection. The gate covers the contracts and baselines you supply, not every possible regression.</p>
   </div>
 </div>
 
-<img src="/demo.gif" alt="Attest demo — the INC-1042 double refund becomes a replayed regression test: incident, capture, replay with zero model calls" class="demo-gif" loading="lazy" />
+<img src="/demo.gif" alt="Attest demo — the INC-1042 double refund becomes a replayed regression test: incident, capture, replay against recorded model responses" class="demo-gif" loading="lazy" />
 
 The full story — the double-refund ledger, the drafted contracts, the blocked revert PR, mutation scores and the HTML viewer — is on the [tour](/tour/). Every command and output there is copied from the live demo.
 

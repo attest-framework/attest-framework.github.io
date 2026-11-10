@@ -1,6 +1,6 @@
 ---
 title: "Tour: from incident to regression test"
-description: The full INC-1042 walk-through — capture a real incident, replay the agent in CI with zero model calls, and gate the merge on the verdict.
+description: The INC-1042 walk-through — capture a synthetic incident, replay the agent's real code against recorded model responses, and apply a merge policy to the results.
 ---
 
 `attest capture` records a run or incident as a fixture and checks that its drafted contracts are consistent with the recording. This does not establish that the recorded behavior is correct; choose independent invariants for that. Strict replay runs your agent's real code against the recorded model responses with zero live model calls for matching requests. Checks report **pass**, **fail**, or **not evaluated** with a reason; a policy determines which results block. Python and TypeScript support this workflow.
@@ -67,7 +67,7 @@ capture inc-1042: tests/attest/fixtures/inc-1042.attest.json
     pass       cardinality-lookup_order-per-order_id      lookup_order within max 1 for each of 1 order_id value(s)
     hard_fail  cardinality-issue_refund-per-order_id      issue_refund called 2× for order_id=O-1042 (max 1)
     pass       cardinality-notify_customer-per-order_id   notify_customer within max 1 for each of 1 order_id value(s)
-  verified: incident reproduction; expected failure: cardinality-issue_refund-per-order_id
+  consistent with the recording: incident reproduction; expected failure: cardinality-issue_refund-per-order_id
   test: drafted tests/attest/test_inc_1042.py
 ```
 
