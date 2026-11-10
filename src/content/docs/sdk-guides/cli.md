@@ -3,7 +3,7 @@ title: "Agent-facing CLI"
 editUrl: "https://github.com/attest-framework/attest/edit/main/docs/guides/cli.md"
 ---
 
-<!-- Synced from attest-framework/attest docs/guides/cli.md at v1.1.0-rc.5 (18aeebeacf9bde5270ba7228b5290c8999b29c90) by scripts/sync-release.mjs. Edit the source in attest, not this file. -->
+<!-- Synced from attest-framework/attest docs/guides/cli.md at v1.1.0 (101de1cdd703b04abf5fd854f347565fd37715b8) by scripts/sync-release.mjs. Edit the source in attest, not this file. -->
 
 `attest` is built for coding agents as well as people. Every command is discoverable offline, prints one JSON document on request, and returns a documented exit code. `attest` in each SDK implements `init` itself and forwards every other command to `attest-engine`; the contract below applies to both spellings.
 

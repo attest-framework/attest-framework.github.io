@@ -3,7 +3,7 @@ title: "Simulation Runtime Guide"
 editUrl: "https://github.com/attest-framework/attest/edit/main/docs/guides/simulation.md"
 ---
 
-<!-- Synced from attest-framework/attest docs/guides/simulation.md at v1.1.0-rc.5 (18aeebeacf9bde5270ba7228b5290c8999b29c90) by scripts/sync-release.mjs. Edit the source in attest, not this file. -->
+<!-- Synced from attest-framework/attest docs/guides/simulation.md at v1.1.0 (101de1cdd703b04abf5fd854f347565fd37715b8) by scripts/sync-release.mjs. Edit the source in attest, not this file. -->
 
 Attest's simulation runtime enables testing AI agents under controlled conditions with simulated users, mocked tools, fault injection, and multi-turn orchestration. All simulation primitives are decorators that compose with Attest's assertion pipeline.
 
