@@ -176,13 +176,13 @@ The fixture accepts CLI options:
 | `ATTEST_ENGINE_TIMEOUT` | Engine response timeout in seconds (default `30`) |
 | `ATTEST_SIMULATION` | Set to `1` for simulation mode: layers 1-4 and 7 evaluate, layers 5-6 report `not_evaluated(simulation)` |
 
-## Version Decoupling
+## SDK and Engine Versions
 
-The SDK version (`__version__`) and engine version (`ENGINE_VERSION`) are independent. Both currently read `1.0.0`, but they are separate constants. The auto-downloader uses `ENGINE_VERSION` to construct the GitHub release URL and the cache directory, not the SDK version. The engine's reported version must equal `ENGINE_VERSION` exactly.
+Each SDK release requires the engine version named by `ENGINE_VERSION`, equal to the SDK's own version. The auto-downloader uses `ENGINE_VERSION` to construct the GitHub release URL and cache directory. A manually supplied engine must report that exact version.
 
 ```python
 from attest import __version__, ENGINE_VERSION
 
-print(__version__)      # "1.0.0"
-print(ENGINE_VERSION)   # "1.0.0"
+print(__version__)      # "1.1.0"
+print(ENGINE_VERSION)   # "1.1.0"
 ```
