@@ -3,9 +3,9 @@ title: "Mutation testing"
 editUrl: "https://github.com/attest-framework/attest/edit/main/docs/guides/mutation.md"
 ---
 
-<!-- Synced from attest-framework/attest docs/guides/mutation.md at v1.1.0 (101de1cdd703b04abf5fd854f347565fd37715b8) by scripts/sync-release.mjs. Edit the source in attest, not this file. -->
+<!-- Synced from attest-framework/attest docs/guides/mutation.md at v1.1.1 (90bb5edfb10a31afe3bd8000217dc594ace746be) by scripts/sync-release.mjs. Edit the source in attest, not this file. -->
 
-A suite that stays green when the agent's behavior breaks is not protecting anything. `attest mutate` measures that: it builds behavior mutants from your captured fixtures, runs your contracts against each one at no model cost, and reports a mutation score, the mutants nobody noticed, and a contract that would notice each.
+Use mutation testing to find gaps in your contracts: would they notice if the agent called a tool twice or changed the wrong record? `attest mutate` deliberately changes captured behavior, runs your contracts against each change with no model calls, and reports an overall score, per-operator scores, survivors and suggested contracts that catch them.
 
 Only behavior is mutated, never source code. A mutant is a copy of a fixture's trace or world snapshot with one deliberate change.
 
@@ -76,7 +76,7 @@ survivors:
     (issue_refund is called at most 1× per order_id)
 ```
 
-`--json` prints [`cli/mutate.schema.json`](https://github.com/attest-framework/attest/blob/v1.1.0/proto/attest/v1/cli/mutate.schema.json): `score`, `seed`, `fixtures`, `mutants` (`id`, `fixture`, `operator`, `description`, `status`, `killed_by` with the assertion id, test id and spec), `survivors_suggestions`, `skipped_specs` and `applicable_specs`, `operators` and `excluded` (below).
+`--json` prints [`cli/mutate.schema.json`](https://github.com/attest-framework/attest/blob/v1.1.1/proto/attest/v1/cli/mutate.schema.json): `score`, `seed`, `fixtures`, `mutants` (`id`, `fixture`, `operator`, `description`, `status`, `killed_by` with the assertion id, test id and spec), `survivors_suggestions`, `skipped_specs` and `applicable_specs`, `operators` and `excluded` (below).
 
 Each suggested contract was checked before it was reported: it passes on the unmutated fixture and hard-fails on the survivor. An effect suggestion leaves out the world snapshot; the test supplies it through the world helper. A survivor the operator table cannot express has no suggestion.
 

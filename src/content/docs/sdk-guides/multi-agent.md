@@ -3,9 +3,9 @@ title: "Multi-Agent Testing Guide"
 editUrl: "https://github.com/attest-framework/attest/edit/main/docs/guides/multi-agent.md"
 ---
 
-<!-- Synced from attest-framework/attest docs/guides/multi-agent.md at v1.1.0 (101de1cdd703b04abf5fd854f347565fd37715b8) by scripts/sync-release.mjs. Edit the source in attest, not this file. -->
+<!-- Synced from attest-framework/attest docs/guides/multi-agent.md at v1.1.1 (90bb5edfb10a31afe3bd8000217dc594ace746be) by scripts/sync-release.mjs. Edit the source in attest, not this file. -->
 
-Attest provides first-class support for testing multi-agent systems through hierarchical trace trees, cross-agent assertions, and delegation tracking. All multi-agent assertions are layer 3 (trace) checks — deterministic, free, and instant.
+Use these checks when one agent delegates work to another: verify which agents ran, what they passed between them and whether they followed the allowed order. Multi-agent assertions are layer 3 (trace) checks: deterministic and free. Multi-agent trace trees are beta in 1.1.0.
 
 ## Trace Tree Model
 
@@ -163,7 +163,7 @@ tree.aggregate_latency  # Total latency_ms across all agents
 
 All multi-agent assertions use `TYPE_TRACE_TREE` (layer 3) and are evaluated by the engine's `TraceTreeEvaluator`.
 
-The snippets below run inside a pytest test that takes the `attest` fixture, with the agent's `AgentResult` in `result`. `attest.evaluate(chain)` runs every assertion in the chain and fails the test on a hard failure; a chain that is never passed to `evaluate()` checks nothing.
+The snippets below run inside a pytest test that takes the `attest` fixture, with the agent's `AgentResult` in `result`. `attest.evaluate(chain)` runs every assertion in the chain and fails the test on a hard failure. In 1.1.0, an unevaluated chain fails its owning test; see [verdicts](/sdk-guides/verdicts/#every-chain-must-be-evaluated).
 
 ### `agent_called(agent_id)`
 

@@ -1,8 +1,26 @@
-<!-- Synced from attest-framework/attest CHANGELOG.md at v1.1.0 (101de1cdd703b04abf5fd854f347565fd37715b8) by scripts/sync-release.mjs. Edit the source in attest, not this file. -->
+<!-- Synced from attest-framework/attest CHANGELOG.md at v1.1.1 (90bb5edfb10a31afe3bd8000217dc594ace746be) by scripts/sync-release.mjs. Edit the source in attest, not this file. -->
 
 All notable changes to Attest are documented in this file. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows [Semantic Versioning](https://semver.org/). One `VERSION` covers the engine, the Python SDK (`attest-ai`) and the TypeScript SDKs (`@attest-ai/core`, `@attest-ai/vitest`); PyPI shows pre-releases in PEP 440 form (`1.0.0-rc.1` → `1.0.0rc1`).
 
 ## [Unreleased]
+
+## [1.1.1] — 2026-11-11
+
+Documentation patch on 1.1.0 "Hardened". It ships the refreshed guides, package READMEs and agent skills to PyPI, npm, `attest guide`, `attest init --skills` and the website, and moves the `attest init --ci github` annotate pin to v1.1.0. No change to evaluation, replay or policy behavior.
+
+### Changed
+
+- `attest init --ci github` (Python and TypeScript) pins `pr-annotate` to the v1.1.0 commit and fetches `attest-ai==1.1.0` in the annotate job, instead of v1.0.1 (#254).
+- `@attest-ai/vitest` requires `@attest-ai/core >=1.1.0` as its peer, instead of `>=1.1.0-rc`.
+
+### Docs
+
+- README: 1.1 status, a 30-second overview, every capability with its guide, a release history in place of the stale roadmap, the `attest doctor` warm-up before the first Vitest run, and a current banner (#256).
+- PyPI and npm READMEs: `uv` install commands, minimal examples that evaluate their chain, supported Python and Vitest ranges (#256).
+- Guides: commands, flags, environment variables and exit codes checked against 1.1.0; plain-language openings and minimal examples where a guide had none; 1.1 behavior documented where it belongs (fail-closed judges and budgets, relational effects, `tests_failed`, semantic refresh, per-operator mutation scores); `uv` instead of `pip` throughout (#255, #257).
+- Agent skills: the capture skill describes the real-code replay test that capture scaffolds, not a frozen-fixture test (#256).
+- Protocol spec: describes protocol v1 as shipped (stdio JSON-RPC only, no planned gRPC mode), with `initialize` examples checked against the engine (#258).
+- `pyproject.toml`: the `attest.plugins` entry-point example names a plugin instance, which is what the loader expects, not a class.
 
 ## [1.1.0] — 2026-11-11
 
@@ -601,7 +619,8 @@ Tagged, not published to registries. No GitHub release was created.
 
 Versions 0.1.0 through 0.6.0 are described in their [GitHub releases](https://github.com/attest-framework/attest/releases); 0.6.1 exists only as a tag. 0.1.0–0.6.0 were published to PyPI; 0.3.0–0.6.0 were also published to npm.
 
-[Unreleased]: https://github.com/attest-framework/attest/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/attest-framework/attest/compare/v1.1.1...HEAD
+[1.1.1]: https://github.com/attest-framework/attest/releases/tag/v1.1.1
 [1.1.0]: https://github.com/attest-framework/attest/releases/tag/v1.1.0
 [1.1.0-rc.5]: https://github.com/attest-framework/attest/releases/tag/v1.1.0-rc.5
 [1.1.0-rc.4]: https://github.com/attest-framework/attest/releases/tag/v1.1.0-rc.4

@@ -3,14 +3,16 @@ title: "Failure viewer"
 editUrl: "https://github.com/attest-framework/attest/edit/main/docs/guides/viewer.md"
 ---
 
-<!-- Synced from attest-framework/attest docs/guides/viewer.md at v1.1.0 (101de1cdd703b04abf5fd854f347565fd37715b8) by scripts/sync-release.mjs. Edit the source in attest, not this file. -->
+<!-- Synced from attest-framework/attest docs/guides/viewer.md at v1.1.1 (90bb5edfb10a31afe3bd8000217dc594ace746be) by scripts/sync-release.mjs. Edit the source in attest, not this file. -->
 
 `attest view` turns report-v2 files into one HTML page you open in a browser: the test list, the trace tree with the failing span highlighted, expected versus actual, replay or live provenance, cost, a baseline-versus-head diff and the mutants that survived. It is a local file, not a server. The page has no JavaScript, makes no network request and loads nothing from outside itself.
+
+**Status in 1.1.0: beta.** The viewer also shows per-operator mutation counts and exclusions when you provide `attest mutate --json` output.
 
 
 ```bash
 ATTEST_REPORT_TRACES=1 uv run pytest --attest-report=attest-report.json
-uv run attest view attest-report.json
+uv run attest view attest-report.json --no-open
 ```
 
 With Vitest, set the same variable and write the report with the reporter (`--reporter=@attest-ai/vitest/reporter --outputFile.attest=attest-report.json`), then run `npx attest view attest-report.json`.
@@ -32,7 +34,7 @@ attest view <report.json...> [--baseline <report.json>...] [--mutation <mutate.j
 
 Exit 0: the page was written. Exit 2: usage error, an unreadable or invalid input, or the page could not be written. The file is written through a temporary file and renamed, with mode 0644.
 
-A screenshot of the page for the INC-1042 duplicate-refund regression, with the second `issue_refund` span highlighted and the baseline diff, is at [images/failure-viewer.png](https://github.com/attest-framework/attest/blob/v1.1.0/docs/guides/images/failure-viewer.png); the baseline section is at [images/failure-viewer-baseline.png](https://github.com/attest-framework/attest/blob/v1.1.0/docs/guides/images/failure-viewer-baseline.png).
+A screenshot of the page for the INC-1042 duplicate-refund regression, with the second `issue_refund` span highlighted and the baseline diff, is at [images/failure-viewer.png](https://github.com/attest-framework/attest/blob/v1.1.1/docs/guides/images/failure-viewer.png); the baseline section is at [images/failure-viewer-baseline.png](https://github.com/attest-framework/attest/blob/v1.1.1/docs/guides/images/failure-viewer-baseline.png).
 
 ## What the page shows
 

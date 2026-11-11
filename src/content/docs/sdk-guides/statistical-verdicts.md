@@ -3,7 +3,7 @@ title: "Statistical verdicts and cost budgets"
 editUrl: "https://github.com/attest-framework/attest/edit/main/docs/guides/statistical-verdicts.md"
 ---
 
-<!-- Synced from attest-framework/attest docs/guides/statistical-verdicts.md at v1.1.0 (101de1cdd703b04abf5fd854f347565fd37715b8) by scripts/sync-release.mjs. Edit the source in attest, not this file. -->
+<!-- Synced from attest-framework/attest docs/guides/statistical-verdicts.md at v1.1.1 (90bb5edfb10a31afe3bd8000217dc594ace746be) by scripts/sync-release.mjs. Edit the source in attest, not this file. -->
 
 A non-deterministic agent can pass a test once and fail it the next time, so one run cannot show that a change made it worse. Attest runs each test a fixed number of times, compares every assertion's pass rate with a pinned baseline using a confidence interval, and returns `pass`, `regressed` or `inconclusive`. Every model call Attest makes for the evaluation reserves its cost against a budget before it is sent, so trials and judges cannot overspend.
 
@@ -63,7 +63,7 @@ Trials whose assertions were not evaluated are left out of the pass rate. The mi
 
 A trial that raises (for example when the agent's model call fails) is a failed trial: its rows are replaced by one `hard_fail` row per assertion of the test, with the exception in the explanation (and the engine's status when the trial had already evaluated that assertion), so every trial contributes exactly one row per assertion. A pytest `skip` or `fail` inside a trial ends the test as usual.
 
-Within a test, assertion ids are derived from the test id and the assertion's position, so the rows of one assertion share an id across trials and across runs. Each report row carries its 1-based `trial`, and the test row carries `trials`. Trials run one after another; pytest supports synchronous tests only (use `attest.simulation.repeat` with `inspect_async()` in `async` tests).
+In 1.1.0, assertion ids use scheme 2: the test scope, assertion type, canonical spec and occurrence among identical assertions determine the id, not its position among distinct checks. Reordering distinct checks preserves their ids, and the same assertion shares an id across trials and runs; editing its spec changes the id. Each report row carries its 1-based `trial`, and the test row carries `trials`. Trials run one after another; pytest supports synchronous tests only (use `attest.simulation.repeat` with `inspect_async()` in `async` tests).
 
 ## 2. Pin a baseline
 
@@ -114,7 +114,7 @@ With a baseline of 18/20 (0.90) the line is 0.85:
 
 ## 4. Budgets
 
-Every model call Attest makes for an evaluation — layer 5 OpenAI embeddings, layer 6 judge calls, `repeat` runs, bias probes, simulated-user messages and retries — reserves one call and its worst-case cost before it is sent, and is reconciled to the token usage the provider reports when it returns. A call that cannot reserve is not sent, and its assertion is `not_evaluated: budget_exhausted`; the test is skipped and the policy warns (exit 2) unless it sets `not_evaluated: block`.
+Every model call Attest makes for an evaluation reserves its worst-case cost before it is sent and reconciles that reservation to the token usage the provider reports. Judge-provider requests (including repeated judge samples, bias probes, simulated-user messages and retries) also reserve one call; embedding requests count toward USD, not `ATTEST_MAX_JUDGE_CALLS`. A refused assertion is `not_evaluated: budget_exhausted`; the test is skipped and the policy warns (exit 2) unless it sets `not_evaluated: block`.
 
 | Scope | Calls | USD |
 |---|---|---|

@@ -3,7 +3,7 @@ title: "Agent-facing CLI"
 editUrl: "https://github.com/attest-framework/attest/edit/main/docs/guides/cli.md"
 ---
 
-<!-- Synced from attest-framework/attest docs/guides/cli.md at v1.1.0 (101de1cdd703b04abf5fd854f347565fd37715b8) by scripts/sync-release.mjs. Edit the source in attest, not this file. -->
+<!-- Synced from attest-framework/attest docs/guides/cli.md at v1.1.1 (90bb5edfb10a31afe3bd8000217dc594ace746be) by scripts/sync-release.mjs. Edit the source in attest, not this file. -->
 
 `attest` is built for coding agents as well as people. Every command is discoverable offline, prints one JSON document on request, and returns a documented exit code. `attest` in each SDK implements `init` itself and forwards every other command to `attest-engine`; the contract below applies to both spellings.
 
@@ -17,6 +17,13 @@ attest guide <topic>    # print one guide as Markdown, offline
 ```
 
 `attest help --json` prints `{"commands": [{"name", "summary", "schema", "subcommands", "exit_codes"}]}`. `schema` and each subcommand's `schema` are paths relative to `proto/attest/v1/` in the attest repository. Run through the SDK (`uv run attest help --json`, `npx attest help --json`), the document also lists `init`, which the SDK implements itself (schema `cli/init.schema.json`; exit 0 success, 1 `--skills` or `--mcp` could not install, 2 usage error). The text form (`attest help`) is unchanged.
+
+For example, ask what this installed engine supports, then read a guide without opening a browser:
+
+```bash
+uv run attest capabilities --json
+uv run attest guide replay --json
+```
 
 ## JSON output
 
