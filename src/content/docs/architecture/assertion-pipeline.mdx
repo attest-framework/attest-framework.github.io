@@ -1,429 +1,187 @@
 ---
 title: "Assertion Pipeline"
-description: "Deep dive into Attest's assertion pipeline — six evaluated layers plus plugins, from free schema validation to LLM-as-judge scoring."
+description: "Attest 1.1.0 evaluation order, deterministic contracts, model-based scoring, and missing verdicts."
 ---
 
 import LayerTable from '@components/LayerTable.astro';
 
-The assertion pipeline is the core evaluation engine in Attest. It processes assertions through six evaluated layers plus plugins, ordered by cost, evaluating the cheapest deterministic checks first and only escalating to expensive probabilistic evaluation when necessary.
+Assertions turn recorded agent behavior into testable contracts. Start with facts you can check directly—tool arguments, output fields, or final world state—and use embeddings or a judge only when the contract needs a semantic assessment.
 
 ## Layers
 
 <LayerTable />
 
-## Pipeline Overview
+In 1.1.0, there are six evaluated layers plus plugins. `trace`, `trace_tree`, and `effect` all run in Layer 3. Simulation is a runtime mode, not another layer.
 
-```mermaid
-flowchart TD
-    INPUT["Trace + Assertions"] --> L1
+## Evaluation order
 
-    subgraph FREE["Free & Deterministic"]
-        L1["Layer 1: Schema<br/>JSON Schema validation"]
-        L2["Layer 2: Constraint<br/>Value ranges, bounds"]
-        L3["Layer 3: Trace and behavior<br/>Tool order, arguments, agent trees, world state"]
-        L4["Layer 4: Content<br/>Regex, keywords, patterns"]
-    end
+The engine stably groups assertions by layer rather than preserving request order:
 
-    subgraph PAID["Paid & Probabilistic"]
-        L5["Layer 5: Embedding<br/>Semantic similarity<br/>Cost depends on the provider"]
-        L6["Layer 6: LLM Judge<br/>Natural language eval<br/>Cost depends on the provider"]
-    end
+1. L1–L4 run sequentially, including trace-tree and world-effect checks in L3.
+2. SDK-computed plugin results are reported. They neither depend on nor gate L5/L6.
+3. L5/L6 run concurrently with a bounded worker pool, default **8**, configurable with `ATTEST_EVAL_CONCURRENCY`.
 
-    subgraph CUSTOM["Plugins"]
-        PLUGIN["Plugin<br/>User-defined logic, run in the SDK process"]
-    end
+Any L1–L4 hard failure prevents L5/L6 calls in that batch. Every affected assertion still receives a `not_evaluated` row with reason `short_circuited`. This is unconditional, not an optional `fail_fast` flag. In simulation, otherwise eligible L5/L6 assertions receive `not_evaluated(simulation)`. Without a registered provider they receive `not_evaluated(provider_not_configured)`.
 
-    L1 --> L2 --> L3 --> L4 --> L5 --> L6 --> PLUGIN
-    PLUGIN --> RESULT["Results: pass / soft_fail / hard_fail"]
-```
+Match response rows by assertion ID. Do not rely on their position or treat batch `total_duration_ms` (summed assertion durations) as wall-clock latency. There are no fixed latency or per-assertion price guarantees.
 
-## Evaluation Order
-
-The engine evaluates layers sequentially within a batch. Deterministic layers (L1-L4) run first. If any deterministic assertion hard-fails and `fail_fast` is enabled, the engine skips expensive L5/L6 evaluation entirely.
-
-```mermaid
-flowchart LR
-    A["Batch Request"] --> B["Phase 1: L1-L4<br/>(sequential, <5ms each)"]
-    B --> C{Any hard fail?}
-    C -->|"Yes + fail_fast"| D["Skip L5/L6<br/>Return results"]
-    C -->|"No"| E["Phase 2: L5/L6<br/>(parallel, 100ms-3s each)"]
-    E --> F["Phase 3: plugins<br/>Return all results"]
-```
-
-:::tip
-The free deterministic Layers 1-4 cover the schema, constraint, trace and content checks. Design tests to maximize deterministic coverage before reaching for embedding similarity or LLM judges.
-:::
-
-## Layer 1: Schema Validation
-
-**Cost:** Free | **Speed:** &lt;1ms | **Deterministic:** Yes
-
-Validates structured data against JSON Schema definitions. Use for tool call arguments, structured output fields, and API response shapes.
-
-### What It Checks
-
-- Tool call arguments match their declared schema
-- Agent output conforms to a required structure
-- Specific fields exist with correct types
-
-### SDK API
+## Build and evaluate a chain
 
 ```python
-# Output matches a JSON Schema
-expect(result).output_matches_schema({
-    "type": "object",
-    "required": ["response", "confidence"],
-    "properties": {
-        "response": {"type": "string"},
-        "confidence": {"type": "number", "minimum": 0, "maximum": 1}
-    }
-})
+from attest import expect
 
-# Tool arguments match schema
-expect(result).tool_args_match_schema("process_refund", {
-    "type": "object",
-    "required": ["order_id", "amount"],
-    "properties": {
-        "order_id": {"type": "string", "pattern": "^ORD-\\d+$"},
-        "amount": {"type": "number", "minimum": 0}
-    }
-})
-```
-
-### Engine Behavior
-
-The engine uses JSON Schema Draft 2020-12 validation. Schema errors produce `hard_fail` with the validation error path and message in the `explanation` field.
-
-## Layer 2: Constraint Checks
-
-**Cost:** Free | **Speed:** &lt;1ms | **Deterministic:** Yes
-
-Evaluates numeric bounds, value ranges, and quantitative constraints on trace metadata and output fields.
-
-### What It Checks
-
-- Token count within budget
-- API cost under threshold
-- Latency under limit
-- Numeric output fields within range
-- Step count bounds
-
-### SDK API
-
-```python
-# Cost and performance constraints
-expect(result).cost_under(0.05)
-expect(result).tokens_under(3000)
-expect(result).latency_under(2000)  # milliseconds
-
-# Generic constraints on trace fields
-expect(result).constraint("metadata.total_tokens", "between", min=100, max=3000)
-expect(result).step_count("lte", 15)
-```
-
-### Engine Behavior
-
-Constraint violations produce `hard_fail`. The engine extracts the target value from the trace and compares against the specified bounds. Missing fields produce `hard_fail` with an explanation indicating the field was not found.
-
-## Layer 3: Trace Inspection
-
-**Cost:** Free | **Speed:** &lt;1ms | **Deterministic:** Yes
-
-Analyzes the execution trace for structural properties: tool call presence, ordering, loops, state machine transitions, and temporal relationships.
-
-### What It Checks
-
-| Check Type | Description |
-|---|---|
-| `contains` | Tool was called at least once |
-| `not_contains` | Tool was never called |
-| `contains_in_order` | Tools called in specified order (other tools may appear between) |
-| `exact_order` | Tools called in exact sequence |
-| `no_duplicates` | No tool called more than once |
-| `loop_detection` | No cyclic tool call patterns |
-| `state_transitions` | Execution follows valid state machine transitions |
-| `max_steps` | Total step count under limit |
-| `max_llm_calls` | LLM call count under limit |
-| `agent_ordered_before` | Agent A completed before Agent B started |
-| `agents_overlap` | Two agents executed with overlapping time windows |
-| `agent_wall_time_under` | Agent total wall time under threshold |
-| `ordered_agents` | Agent groups executed in sequential order |
-
-### SDK API
-
-```python
-# Tool presence and ordering
-expect(result).required_tools(["lookup_order"])
-expect(result).forbidden_tools(["delete_account"])
-expect(result).tools_called_in_order(["check_eligibility", "process_refund"])
-
-# Loop and duplicate detection
-expect(result).no_duplicate_tools()
-expect(result).no_tool_loops("lookup_order", max_repetitions=2)
-expect(result).step_count("lte", 15)
-
-# State machine transitions (multi-agent trace tree)
-expect(result).follows_transitions([
-    ("IDENTIFY", "VERIFY"),
-    ("VERIFY", "CHECK_ELIGIBILITY"),
-    ("CHECK_ELIGIBILITY", "PROCESS"),
-])
-
-# Temporal assertions (multi-agent)
-expect(result).agent_ordered_before("FixProposer", "Critic")
-expect(result).agents_overlap("LogAnalyst", "RunbookResearcher")
-expect(result).agent_wall_time_under("LogAnalyst", 5000)  # milliseconds
-
-# Ordered agent sequences
-expect(result).ordered_agents([
-    ["LogAnalyst", "RunbookResearcher"],  # parallel group
-    ["FixProposer"],                       # must follow research
-    ["Critic"],                            # must follow proposal
-])
-```
-
-### Engine Behavior
-
-Trace assertions operate on the `steps` array and optional temporal metadata (`started_at_ms`, `ended_at_ms`). Temporal assertions require adapters to populate timestamp fields — missing temporal data produces `hard_fail` with a diagnostic message.
-
-## Layer 4: Content Pattern Matching
-
-**Cost:** Free | **Speed:** &lt;5ms | **Deterministic:** Near (regex-based)
-
-Matches output text against patterns, keywords, and content rules. Use for verifying the agent mentioned required information, avoided prohibited content, or followed formatting rules.
-
-### What It Checks
-
-- Substring presence or absence
-- Regex pattern matching
-- PII detection patterns (SSN, credit card, email)
-- Keyword lists (must-include or must-exclude)
-
-### SDK API
-
-```python
-# Content presence
-expect(result).output_contains("ORD-123456")
-expect(result).output_has_any_keyword(["refund processed", "refund approved"])
-
-# Content absence
-expect(result).output_not_contains("internal_api_key")
-expect(result).output_forbids(["jira", "salesforce", "zendesk"])
-
-# Regex patterns
-expect(result).output_matches_regex(r"\$\d+\.\d{2}")  # dollar amount
-expect(result).output_forbids([r"\b\d{3}-\d{2}-\d{4}\b"])  # SSN
-```
-
-### Engine Behavior
-
-Content assertions use Go's `regexp` package. Pattern matching is case-sensitive by default. The engine evaluates all content assertions against the `output.message` field of the trace.
-
-## Layer 5: Embedding Similarity
-
-**Cost:** ~$0.001/call | **Speed:** ~100ms | **Deterministic:** Near
-
-Computes semantic similarity between the agent's output and a reference text using embedding vectors. Use when you need to verify meaning without matching exact wording.
-
-### What It Checks
-
-- Output meaning is close to an expected answer
-- Response covers required topics
-- Denial messages convey the right reason
-
-### SDK API
-
-```python
-expect(result).output_similar_to(
-    "Your order is outside the 30-day return window and is not eligible for a refund.",
-    threshold=0.7
-)
-```
-
-### Engine Behavior
-
-The engine computes cosine similarity between embedding vectors of the output text and the reference text. Embedding provider is configurable via `ATTEST_EMBEDDING_PROVIDER` (options: `auto`, `openai`, `onnx`).
-
-Scores map to the soft failure system:
-- `>= threshold` — `pass` with score = similarity value
-- `< threshold` and `>= 0.5` — `soft_fail`
-- `< 0.5` — `hard_fail`
-
-## Layer 6: LLM-as-Judge
-
-**Cost:** ~$0.01+/call | **Speed:** 1-3s | **Deterministic:** No
-
-Uses an LLM to evaluate subjective qualities: empathy, helpfulness, coherence, faithfulness, tone. This is the most powerful but most expensive and least deterministic layer.
-
-### What It Checks
-
-- Subjective quality dimensions (empathy, professionalism, coherence)
-- Faithfulness to source material
-- Tone and style compliance
-- Complex reasoning evaluation
-
-### SDK API
-
-```python
-expect(result).passes_judge("The response shows empathy", threshold=0.7)
-expect(result).passes_judge("The response is helpful", threshold=0.8)
-expect(result).passes_judge("The response is professional", rubric="professional", threshold=0.8)
-```
-
-### Engine Behavior
-
-The engine constructs a judge prompt with the agent's output, the evaluation dimension, and a scoring rubric. The judge LLM returns a score from 0.0 to 1.0 with an explanation.
-
-Configuration:
-- `ATTEST_JUDGE_PROVIDER` — LLM provider (`openai`, `anthropic`, `gemini`, `acp`)
-- `ATTEST_JUDGE_MODEL` — Model name (e.g., `gpt-4.1`)
-
-:::caution
-LLM judges are non-deterministic. The same input can produce different scores across runs. Run judge assertions several times and compare scores to measure reliability, and mark them `soft=True` so a single low score does not block a run.
-:::
-
-## Trace Tree Assertions (Layer 3)
-
-**Cost:** Free | **Speed:** &lt;5ms | **Deterministic:** Yes
-
-Analyzes the structure of multi-agent execution trees. Use for verifying agent delegation patterns, tree depth, and cross-agent relationships.
-
-### What It Checks
-
-- Agent delegation structure matches expected topology
-- Trace tree depth within bounds
-- Specific agents present in the tree
-- Cross-agent data flow
-
-### SDK API
-
-```python
-tree = TraceTree(root=result.trace)
-
-# Verify agents participated
-assert "LogAnalyst" in tree.agents
-assert "Critic" in tree.agents
-
-# Verify tree depth
-assert tree.depth <= 3
-
-# Find specific agent sub-traces
-analyst_trace = tree.find_agent("LogAnalyst")
-assert analyst_trace is not None
-```
-
-### Engine Behavior
-
-Trace tree assertions operate on the nested `sub_trace` fields within `agent_call` steps. The engine traverses the tree to locate agents, compute depth, and verify structural properties.
-
-## Plugins
-
-**Cost:** Varies | **Speed:** Varies | **Deterministic:** Varies
-
-Runs user-defined evaluation logic. Plugins execute outside the engine and submit results back via the `submit_plugin_result` JSON-RPC method.
-
-### What It Checks
-
-- Custom business logic evaluation
-- External API validation
-- Domain-specific scoring
-- Integration with third-party evaluation tools
-
-### SDK API
-
-```python
-# Plugin assertions are submitted asynchronously
-expect(result).plugin("compliance_checker", {"ruleset": "pci"})
-
-# The SDK computes the result and submits it to the engine
-await client.submit_plugin_result(
-    trace_id=trace.trace_id,
-    plugin_name="compliance_checker",
-    assertion_id="assert_compliance_01",
-    status="pass",
-    score=0.95,
-    explanation="All compliance rules satisfied",
-)
-```
-
-### Engine Behavior
-
-The engine registers plugin assertions during `evaluate_batch` but does not evaluate them immediately. Instead, it waits for the SDK to submit plugin results via `submit_plugin_result`. The engine correlates results by `assertion_id`.
-
-## Soft Failure Budget
-
-Layers 5 and 6 produce continuous scores (0.0 to 1.0) rather than binary pass/fail. The soft failure system classifies these scores:
-
-```mermaid
-flowchart LR
-    SCORE["Score: 0.0 - 1.0"] --> CHECK{Score value}
-    CHECK -->|"< 0.5"| HF["hard_fail<br/>Block merge"]
-    CHECK -->|"0.5 - 0.8"| SF["soft_fail<br/>Warn, count against budget"]
-    CHECK -->|"> 0.8"| PASS["pass"]
-
-    SF --> BUDGET{Within budget?}
-    BUDGET -->|Yes| ALLOW["Allow merge"]
-    BUDGET -->|No| BLOCK["Block merge"]
-```
-
-Configure the budget per engine session:
-
-```bash
-# Allow up to 2 soft failures per engine session before blocking
-export ATTEST_MAX_SOFT_FAILURES=2
-```
-
-## Tier Mapping
-
-The tier system maps assertion layers to cost categories for test scheduling:
-
-| Tier | Layers | Cost per Assertion | Typical Use |
-|---|---|---|---|
-| **TIER_1** | L1, L2, L3, L4 | Free | Development, every commit |
-| **TIER_2** | L5 | Depends on the embedding provider | PR validation |
-| **TIER_3** | L6 | Depends on the judge provider | Pre-merge, nightly |
-
-```python
-from attest import TIER_1, expect, tier
-
-@tier(TIER_1)
-def test_tool_schema(attest, result):
+def test_refund_contract(attest, result):
     chain = (
         expect(result)
-        .output_matches_schema(schema)
         .required_tools(["lookup_order"])
-        .output_contains("ORD-123")
+        .output_contains("refund")
+        .cost_under(0.05)
     )
     attest.evaluate(chain)
 ```
 
-Run tier-filtered tests:
+`expect()` builds a chain; it does not execute it. Pytest and Vitest fail a test that leaves a chain unevaluated, including assertions added after an earlier evaluation. This also applies to chains made in fixtures and concurrent Vitest tests.
 
-```bash
-# Free tests only (development)
-pytest -m attest --attest-tier=1
+## L1: Schema validation
 
-# Include embeddings (PR check)
-pytest -m attest --attest-tier=2
+Schema checks validate a trace target against JSON Schema. For example:
 
-# Full suite (nightly CI)
-pytest -m attest
+```python
+attest.evaluate(expect(result).output_matches_schema({
+    "type": "object",
+    "required": ["status"],
+    "properties": {"status": {"type": "string"}},
+}))
 ```
 
-## Batch Evaluation Parallelization
+Use `tool_args_match_schema()` for tool argument shapes. Invalid schemas and schema violations fail the assertion. Schema references cannot load files or fetch network resources; references within the schema document can resolve.
 
-The engine splits batch evaluation into two phases:
+## L2: Constraints
 
-1. **Phase 1 (sequential):** Deterministic layers L1-L4 evaluate in sequence. Each takes &lt;5ms.
-2. **Phase 2 (parallel):** Probabilistic layers L5-L6 evaluate concurrently with a configurable concurrency limit (default: 4).
+Constraints compare recorded values, such as agent cost, token use, latency, and step counts, against bounds:
 
-This prevents a batch with 5 LLM judge assertions at 2s each from taking 10s sequentially — parallel evaluation brings it to ~2.5s.
+```python
+attest.evaluate(
+    expect(result).cost_under(0.05).tokens_under(3000).latency_under(2000)
+)
+```
 
-| Configuration | Default | Description |
+Latency is in milliseconds. Agent cost assertions inspect the trace's `metadata.cost_usd`; they do not limit Attest's embedding or judge spend. Missing evidence must not be interpreted as a recorded zero.
+
+## L3: Trace and behavioral checks
+
+Tool checks inspect what ran, in what order, with which arguments, and how often per business key. Trace-tree checks inspect delegation, agent output, and relationships between nested traces. Temporal checks require recorded timestamps; an adapter cannot recover timing or identity the source did not provide.
+
+```python
+attest.evaluate(
+    expect(result)
+    .required_tools(["lookup_order"])
+    .forbidden_tools(["delete_account"])
+    .tools_called_in_order(["check_eligibility", "process_refund"])
+)
+```
+
+`TraceTree` also supports direct inspection of nested `agent_call` steps and their `sub_trace` values. These are deterministic checks, not judge calls.
+
+### Final world state and relational effects
+
+An `effect` assertion checks a supplied world-v1 snapshot, not the trace's tool steps. A tool call saying “refund” does not prove that only one refund was stored. `count`, `unique`, and `idempotent` check record counts and keys; `sum` and `matches` compare amounts or related records.
+
+```python
+from attest import expect, related
+
+snapshot = world.state()  # a running world helper's snapshot
+attest.evaluate(expect(result).world(snapshot).sum(
+    "refunds", "amount_cents",
+    at_most=related("orders", "amount_cents", on="order_id"),
+))
+attest.evaluate(expect(result).world(snapshot).matches(
+    "notifications", "customer_id",
+    related("orders", "customer_id", on="order_id"),
+))
+```
+
+- A numeric `sum(..., at_most=100)` bounds the total of matching records. A related bound groups source records by `on` and checks each sum against the related record's field.
+- `matches` requires each matching source record's field to equal the related record's field, joined using the same `on` field on both resources. It is record equality, not regex matching.
+- `where` and keyword filters are exact-match source-record filters. They do not filter the related resource.
+- Sums use exact decimal arithmetic. Strings, nulls, booleans, and missing numeric fields are not silently counted as zero.
+- Missing join keys or related records fail the contract; duplicate related keys are ambiguous evidence and fail. Mismatched or missing comparison fields fail `matches`.
+- Empty source selections do not prove a record exists: combine these checks with `count` when existence is required.
+- A null snapshot yields `not_evaluated(missing_evidence)`. A missing or malformed snapshot is an invalid effect spec and fails.
+
+Both Python and TypeScript provide `related` and world-effect checks; Python uses snake_case and TypeScript camelCase option names where applicable.
+
+## L4: Content
+
+Content checks compare a selected trace target to substrings, keywords, or Go regular expressions. SDK output helpers select `output.message`; the engine is not limited to that field.
+
+```python
+attest.evaluate(
+    expect(result)
+    .output_contains("refund")
+    .output_not_contains("internal_api_key")
+    .output_matches_regex(r"ORD-\d+")
+)
+```
+
+Substring and keyword checks default to case-insensitive comparisons. Regex matching uses the pattern itself; use regex flags when needed. It is deterministic, not “near deterministic.” A regex can check a chosen PII pattern but is not a general guarantee that output is free of sensitive data.
+
+## L5: Embedding similarity
+
+Embedding checks compare output and reference vectors using cosine similarity:
+
+```python
+attest.evaluate(expect(result).output_similar_to(
+    "The order is outside the return window.", threshold=0.7,
+))
+```
+
+`ATTEST_EMBEDDING_PROVIDER` accepts `auto`, `openai`, or `onnx`. OpenAI calls can incur cost; local ONNX embeddings do not incur provider API charges. Cache hits can reuse text embeddings. Provider, model, input, and cache state affect cost and runtime; there is no fixed dollar price per assertion.
+
+## L6: LLM judge
+
+A judge scores the selected output against criteria and a rubric:
+
+```python
+attest.evaluate(expect(result).passes_judge(
+    "The response explains why the refund was denied.", threshold=0.8,
+))
+```
+
+The Python defaults are `rubric="default"`, `threshold=0.8`, and `soft=False`. Supported judge providers are `openai`, `anthropic`, `gemini`, and local-only `acp`. Anthropic and Gemini require `ATTEST_JUDGE_MODEL`. A custom endpoint uses `ATTEST_JUDGE_BASE_URL` and requires `ATTEST_JUDGE_API_KEY`; exported standard provider keys are not sent to it. ACP is refused in CI and under a USD budget.
+
+### Fail-closed replies and caching
+
+A malformed judge reply, explicit abstention, or credential rejection is not a passing score. Results distinguish `judge_malformed`, `judge_abstained`, and `provider_auth`; other unavailable-provider failures use `provider_unavailable`. Authentication rejections (401/403) are not retried. Only transient HTTP failures (408, 429, 5xx) and qualifying network errors are retried, subject to budgets and deadlines.
+
+Judge cache identity includes criteria and target content, rubric version, repeat count and bias probes, model, and provider/endpoint scope. Changing the threshold reclassifies a cached score against the current threshold; it does not reuse the old pass/fail decision. Invalid specs are rejected before cache lookup. A cache hit incurs no new judge call. Abstentions and malformed replies are not cached as scored verdicts. Repeated judge evaluation uses the median of scored samples and exposes sample/variance metadata; it is not the same as repeated independent tests.
+
+### Scoring is assertion-specific
+
+For ordinary embedding and judge assertions, meeting the configured threshold passes. A score below it is `hard_fail` by default, or `soft_fail` with `soft=True`. There is **no universal rule** that all scores between 0.5 and 0.8 are soft failures. Neither a soft failure nor `not_evaluated` automatically grants merge permission: CI policy decides that.
+
+Dynamic thresholds (`threshold="dynamic"`) use historical passing and soft-failing scores. The estimator uses up to 50 eligible prior runs and needs 10 to activate. Its bar is `max(static_threshold, mean - 2 * max(stddev, 0.02))`; a previously passing score below the active bar becomes `hard_fail`, or `soft_fail` when the assertion specifies `soft=True`. Existing failures keep their status. If the history store cannot be read, `threshold_source: dynamic_unavailable` exposes the static fallback.
+
+## Plugins
+
+Plugins execute custom logic in the SDK process. The SDK submits a computed result using `submit_plugin_result` before evaluating its plugin assertion. The engine retrieves the stored result by trace ID, assertion ID, and plugin name; it does not wait for a later submission. Plugin cost and determinism depend on the plugin, not its layer number.
+
+## Budgets, simulation, and policy
+
+`ATTEST_MAX_SOFT_FAILURES` limits soft failures per engine session. Exceeding it sets the batch's `budget_exceeded` flag without dropping rows. `ATTEST_MAX_JUDGE_CALLS` and `ATTEST_BUDGET_USD`, plus optional per-batch limits, cap Attest-initiated model calls. Refused model work returns `not_evaluated(budget_exhausted)`. Use batch `usage` for model-spend accounting, not only assertion `cost` or `total_cost`; embedding result costs do not provide that full ledger.
+
+`ATTEST_SIMULATION=1` runs deterministic checks for real and disables L5/L6 evaluation. It neither bypasses the engine nor fakes passes, and it does not prevent the application under test from making model calls. Under the default pytest/Vitest enforcement, a missing verdict skips the test unless a failure is also present; pytest's `--attest-strict` makes missing verdicts fail. The default CI policy warns on `not_evaluated`; set `not_evaluated: block` to require complete verdicts.
+
+## Cost tiers
+
+| Tier | Layers | Use |
 |---|---|---|
-| `ATTEST_EVAL_CONCURRENCY` | `4` | Max concurrent L5/L6 evaluations per batch |
-| `ATTEST_EVAL_FAIL_FAST` | `true` | Skip L5/L6 if any L1-L4 assertion hard-fails |
+| `TIER_1` | L1–L4 | Deterministic development checks, including effects and trace trees |
+| `TIER_2` | L5 | Embedding checks; provider-dependent cost |
+| `TIER_3` | L6 | Judge checks; provider-dependent cost |
 
-:::note
-Fail-fast mode is enabled by default. If any free deterministic assertion fails, the engine skips expensive probabilistic evaluation entirely. This keeps failed test runs fast and cheap.
-:::
+```bash
+uv run pytest -m attest --attest-tier=1
+```
+
+See the [JSON-RPC reference](/reference/engine/json-rpc-protocol/) for wire fields and the [Adapter System](/architecture/adapter-system/) for how traces acquire evidence.

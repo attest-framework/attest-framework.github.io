@@ -5,7 +5,7 @@ description: "Complete reference for the Agent class, agent() factory, and deleg
 
 > **Python equivalent:** [Python Expect DSL](/reference/python/expect-dsl/) (the `@agent` decorator)
 
-The `Agent` class wraps an agent function, manages trace construction via `TraceBuilder`, and returns an `AgentResult` for assertion chains.
+`Agent` records a function's run as a trace so you can test it with assertion chains. Use `run()` for synchronous functions and `arun()` for asynchronous ones; use `withTrace()` when an adapter has already captured the trace.
 
 ## Import
 
@@ -60,8 +60,8 @@ const result = myAgent.run({ question: "What is the answer?" });
 ```
 
 **Output handling:**
-- Object return values are used as-is for trace output.
-- Non-object return values (string, number, etc.) are wrapped as `{ result: <value> }`.
+- Non-null, non-array objects are used as-is for trace output.
+- Other values, including arrays and `null`, are wrapped as `{ result: <value> }`.
 - `undefined` returns become `{ result: null }`.
 
 ### `arun()`
@@ -182,6 +182,8 @@ const result = await orchestrator.arun({ query: "attest framework" });
 
 The resulting trace contains an `agent_call` step with the child's full trace embedded as `sub_trace`.
 
+`delegate()` records the child trace and parent link, but does not populate step timestamps or agent identity on every child step. Timing assertions need that evidence explicitly (for example via `addStep()` with `agent_id`, `started_at_ms`, and `ended_at_ms`); delegation order alone is not timing evidence.
+
 ---
 
 ## `AgentResult`
@@ -195,6 +197,7 @@ class AgentResult {
     assertionResults?: readonly AssertionResult[],
     totalCost?: number,
     totalDurationMs?: number,
+    usage?: Usage,
   )
 }
 ```
@@ -207,6 +210,7 @@ class AgentResult {
 | `assertionResults` | `readonly AssertionResult[]` | All assertion results after engine evaluation. Empty before evaluation. |
 | `totalCost` | `number` | Total evaluation cost in USD. |
 | `totalDurationMs` | `number` | Total evaluation duration in milliseconds. |
+| `usage` | `Usage` | Attest model usage: model/judge calls, input/output/cached tokens, cost, retry cost, unpriced calls and budget refusals. |
 
 ### Computed Properties
 
@@ -228,6 +232,8 @@ class AgentResult {
 |--------|---------|-------------|
 | `outcome(options?: { strict?: boolean })` | `"pass" \| "fail" \| "skip"` | Test outcome for the whole batch: any `hard_fail` fails; otherwise any `not_evaluated` skips (fails when `strict`); otherwise passes, including soft failures. |
 | `skipReason()` | `string` | `"not evaluated: <reason>[, ...]"` text for skipped tests. |
+
+Constructor defaults are `[]`, `0`, `0` and zero usage for the optional arguments. Unknown result statuses are normalized to `not_evaluated`, not accepted as passes. `passed` is not the test verdict: use `outcome()` when soft failures and missing verdicts must be handled correctly.
 
 ```typescript
 const evaluated = await evaluate(chain);
@@ -252,7 +258,7 @@ if (!evaluated.passed) {
 | Status | Constant | Meaning |
 |--------|----------|---------|
 | `"pass"` | `STATUS_PASS` | Assertion succeeded. |
-| `"soft_fail"` | `STATUS_SOFT_FAIL` | Assertion failed but was marked `soft: true`. Reported as warning. |
+| `"soft_fail"` | `STATUS_SOFT_FAIL` | Non-blocking failure, from an explicit soft assertion or a semantic score in its soft band. Reported as a warning. |
 | `"hard_fail"` | `STATUS_HARD_FAIL` | Assertion failed. Test should fail. |
 | `"not_evaluated"` | `STATUS_NOT_EVALUATED` | Engine did not evaluate the assertion (for example, embedding and judge layers in simulation mode). Test is skipped, or fails under strict mode. |
 
@@ -293,17 +299,15 @@ const pipeline = new Agent("orchestrator", async (builder, args) => {
 });
 
 describe("multi-agent pipeline", () => {
-  it("delegates correctly", async () => {
+  it("delegates correctly", async (context) => {
     const result = await pipeline.arun({ topic: "AI testing" });
 
     const chain = attestExpect(result)
       .agentCalled("researcher")
       .agentCalled("writer")
-      .agentOrderedBefore("researcher", "writer")
-      .delegationDepth(1)
-      .aggregateCostUnder(0.10);
+      .delegationDepth(1);
 
-    const evaluated = await evaluate(chain);
+    const evaluated = await evaluate(chain, { context });
     expect(evaluated.passed).toBe(true);
   });
 });

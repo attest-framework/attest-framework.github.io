@@ -5,7 +5,7 @@ description: "Complete reference for TraceBuilder, TraceTree, and manual trace c
 
 > **Python equivalent:** [Python TraceBuilder](/reference/python/trace-builder/)
 
-`TraceBuilder` constructs `Trace` objects step by step. `TraceTree` provides read-only traversal and aggregation over multi-agent trace hierarchies.
+Use `TraceBuilder` when you already know what happened and need a trace without a provider adapter. `TraceTree` lets you inspect nested agent runs and sum their recorded metrics. Both work without making model calls.
 
 ## Import
 
@@ -17,7 +17,7 @@ import { TraceBuilder, TraceTree } from '@attest-ai/core';
 
 ## `TraceBuilder`
 
-Fluent builder for constructing `Trace` objects. Every method returns `this` for chaining.
+Fluent builder for constructing `Trace` objects. Setters and step-addition methods return `this`; `build()` returns a trace and `getTraceId()` returns its ID.
 
 ### Constructor
 
@@ -40,6 +40,8 @@ Override the auto-generated trace ID.
 ```typescript
 setTraceId(traceId: string): this
 ```
+
+`getTraceId(): string` returns the current ID. Changing it with `setTraceId()` does not rewrite parent links on previously built child traces.
 
 ### `setInput()`
 
@@ -96,7 +98,9 @@ builder.addToolCall("web_search", {
   args: { query: "attest framework" },
   result: { urls: ["https://example.com"] },
 });
+
 ```
+When an active mock registry contains the tool name, `addToolCall()` invokes the mock with the arguments object. A non-null, non-array object replaces the recorded result; a Promise is rejected because tool mocks must be synchronous. This does not execute the real tool or block unrelated network calls.
 
 ### `addRetrieval()`
 
@@ -122,7 +126,7 @@ builder.addRetrieval("vector_db", {
 
 ### `addStep()`
 
-Add a raw `Step` object. Use for custom step types (e.g., `agent_call` with `sub_trace`).
+Add a complete `Step` object, such as an `agent_call` with `sub_trace`. Use this method for timing fields (`started_at_ms`, `ended_at_ms`), per-step `agent_id` / `agent_role`, and trace-v2 evidence; the convenience methods above do not accept those options.
 
 ```typescript
 addStep(step: Step): this
@@ -154,7 +158,7 @@ builder.setOutput({ message: "The capital of France is Paris." });
 
 ### `setMetadata()`
 
-Set trace-level metadata (tokens, cost, latency, model, timestamp).
+Set trace-level metadata (tokens, cost, latency, model, timestamp). This replaces the metadata object, unlike Python's merging `set_metadata()`.
 
 ```typescript
 setMetadata(metadata: {
@@ -185,7 +189,7 @@ setParentTraceId(parentId: string): this
 
 ### `build()`
 
-Build the final `Trace` object. Throws if `setOutput()` was not called.
+Build the trace with `schema_version: 1`. Throws if `setOutput()` was not called. The step list is copied, but step objects, input/output and metadata remain shared references; this is not a deeply frozen snapshot.
 
 ```typescript
 build(): Trace
@@ -220,7 +224,7 @@ const trace = builder
 
 ## `Trace` Interface
 
-The immutable trace object produced by `TraceBuilder.build()`.
+The interface is read-only at the type level, not deeply frozen at runtime. Builders emit trace schema 1; captured traces can use schema 2. This is independent of JSON-RPC protocol version 1.
 
 ```typescript
 interface Trace {
@@ -232,6 +236,9 @@ interface Trace {
   readonly steps: readonly Step[];
   readonly metadata?: TraceMetadata;
   readonly parent_trace_id?: string;
+  readonly conversation_id?: string;  // Trace v2
+  readonly turns?: readonly Turn[];
+  readonly handoffs?: readonly Handoff[];
 }
 ```
 
@@ -249,8 +256,17 @@ interface Step {
   readonly ended_at_ms?: number;
   readonly agent_id?: string;
   readonly agent_role?: string;
+  readonly span_id?: string;         // Trace v2
+  readonly parent_span_id?: string;
+  readonly tool_call_id?: string;
+  readonly retry_of?: number;
+  readonly error?: StepError;
+  readonly exchange?: Exchange;
 }
 ```
+
+Trace-v2 helper types describe the extra evidence: `StepError` has `type` and optional `message`; `Exchange` has `request` and `response` objects; `Turn` has an `index`, `step_indices`, and optional `span_id`, `input`, `output`; `Handoff` has `from_agent`, `to_agent`, and `step_index`. Build a schema-2 `Trace` directly (or preserve it from capture) when using these fields: the convenience builder still emits schema 1.
+
 
 ### Step Type Constants
 
@@ -451,8 +467,8 @@ import { TIER_1, TIER_2, TIER_3, tier } from '@attest-ai/core';
 | Constant | Value | Assertion Layers | Cost |
 |----------|-------|-----------------|------|
 | `TIER_1` | `1` | Schema, Constraint, Trace, Content (L1-L4) | Free |
-| `TIER_2` | `2` | + Embedding (L5) | Low |
-| `TIER_3` | `3` | + LLM Judge (L6) | High |
+| `TIER_2` | `2` | + Embedding (L5) | Local ONNX or hosted provider |
+| `TIER_3` | `3` | + LLM Judge (L6) | Depends on judge provider |
 
 ### `tier()`
 
@@ -487,6 +503,20 @@ const tier1Tests = filterByTier(allTests, TIER_1);
 
 Adapters convert provider-specific response formats into `Trace` objects.
 
+Release 1.1.0 has seven TypeScript adapters:
+
+| Adapter | Maturity |
+|---|---|
+| OpenAI | Stable |
+| Anthropic | Stable |
+| Manual | Stable |
+| Gemini | Beta |
+| Ollama | Beta |
+| LangChain.js | Beta |
+| OpenTelemetry | Beta |
+
+Framework and telemetry adapters use callbacks/spans rather than the single-response interface below. Provider tool-call steps represent model requests, not proof that a tool executed.
+
 ```typescript
 import {
   OpenAIAdapter,
@@ -511,18 +541,20 @@ interface TraceAdapter {
 
 ### `OpenAIAdapter`
 
-Converts OpenAI chat completion responses to traces.
+Converts OpenAI Chat Completions **and Responses API** results to traces, including refusals as output text.
 
 ```typescript
 class OpenAIAdapter {
   constructor(agentId?: string)
 
   traceFromResponse(
-    response: OpenAIChatCompletion,
+    response: OpenAIChatCompletion | OpenAIResponse,
     options?: {
       inputMessages?: Record<string, unknown>[];
       costUsd?: number;
       latencyMs?: number;
+      startedAtMs?: number;
+      endedAtMs?: number;
       structuredOutput?: Record<string, unknown>;
     },
   ): Trace
@@ -548,6 +580,8 @@ const chain = attestExpect(trace).outputContains("Hello");
 
 The adapter extracts:
 - LLM call step from the completion
-- Tool call steps from `tool_calls` in the response
-- Token usage from `usage.total_tokens`
+- Tool requests from Chat Completions `tool_calls` or Responses `function_call` items
+- Total, input and output token counts when supplied by the provider
 - Model name from `response.model`
+
+`latencyMs` takes precedence over `endedAtMs - startedAtMs`; no cost is inferred when `costUsd` is omitted. The default structured output is `{}` unless `structuredOutput` is supplied. See [Framework Adapters](/guides/framework-adapters/) for other integrations.

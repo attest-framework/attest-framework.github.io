@@ -3,9 +3,8 @@ title: "TraceBuilder & TraceTree"
 description: "Manual trace construction and multi-agent trace tree analysis in the Python SDK."
 ---
 
-import { Tabs, TabItem } from '@astrojs/starlight/components';
 
-The `TraceBuilder` class provides a fluent API for manually constructing `Trace` objects. `TraceTree` enables multi-agent trace analysis including delegation chains, cross-agent queries, and aggregate metrics.
+Use `TraceBuilder` when you already know what happened and want to record it without a provider adapter. It creates the trace that assertions check; `TraceTree` lets you inspect nested agent runs and sum their recorded metrics.
 
 ## TraceBuilder
 
@@ -22,6 +21,8 @@ builder = TraceBuilder(agent_id="my-agent")
 | `agent_id` | `str \| None` | `None` | Identifier for the agent producing this trace |
 
 A unique `trace_id` is auto-generated as `trc_{uuid_hex[:12]}`.
+
+Use `builder.set_trace_id(trace_id: str)` to override the generated ID. Builder setters and step-addition methods return the builder for chaining; `build()` returns the trace.
 
 ### Setting Input
 
@@ -65,7 +66,7 @@ builder.add_tool_call(
 ```
 
 :::note
-In simulation mode, if a mock is registered for the tool name via `mock_tool`, the mock function is called and its return value replaces the `result` parameter.
+If an active mock registry contains the tool name, `add_tool_call()` invokes the mock with the supplied arguments. A dictionary return value replaces `result`. This records mocked evidence; it does not call the real tool or prevent unrelated agent network calls.
 :::
 
 #### `add_retrieval`
@@ -97,7 +98,7 @@ builder.add_step(Step(
 
 ### Step Parameters
 
-All `add_*` methods share the same parameter signature:
+`add_llm_call`, `add_tool_call`, and `add_retrieval` share these parameters. `add_step(step: Step)` instead accepts a complete step, including nested trace or trace-v2 evidence.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -144,6 +145,8 @@ builder.set_metadata(
 | `model` | `str \| None` | `None` | Primary model used |
 | `timestamp` | `str \| None` | `None` | ISO 8601 timestamp |
 
+`set_metadata()` merges supplied non-`None` values with existing metadata. Input/output setters replace their dictionaries. No builder method automatically measures token usage, cost or latency.
+
 ### Parent Trace ID
 
 Link a trace to a parent for multi-agent scenarios:
@@ -157,8 +160,7 @@ builder.set_parent_trace_id("trc_abc123def456")
 ```python
 trace = builder.build()
 ```
-
-Returns a `Trace` dataclass. The builder is not consumed — calling `build()` multiple times produces independent traces sharing the same `trace_id`.
+Returns a `Trace` dataclass with `schema_version=1`. The builder is not consumed. Each `build()` copies the step list, but the steps, input/output dictionaries and metadata are shared references, not deep independent snapshots. Do not mutate them after recording a trace.
 
 ### Complete Example
 
@@ -206,12 +208,15 @@ The `Trace` object produced by `build()`:
 |-------|------|-------------|
 | `trace_id` | `str` | Unique identifier |
 | `output` | `dict[str, Any]` | Agent output (required) |
-| `schema_version` | `int` | Protocol version (always `1`) |
+| `schema_version` | `int` | Trace schema version (builder emits `1`; captured traces can be `2`); not the JSON-RPC protocol version |
 | `agent_id` | `str \| None` | Agent identifier |
 | `input` | `dict[str, Any] \| None` | Agent input |
 | `steps` | `list[Step]` | Ordered execution steps |
 | `metadata` | `TraceMetadata \| None` | Aggregate metrics |
 | `parent_trace_id` | `str \| None` | Parent trace link |
+| `conversation_id` | `str \| None` | Trace-v2 conversation identity |
+| `turns` | `list[Turn]` | Trace-v2 turns and their step indices |
+| `handoffs` | `list[Handoff]` | Trace-v2 agent handoffs and their step indices |
 
 ### Step Dataclass
 
@@ -227,10 +232,17 @@ The `Trace` object produced by `build()`:
 | `ended_at_ms` | `int \| None` | End timestamp |
 | `agent_id` | `str \| None` | Agent identifier |
 | `agent_role` | `str \| None` | Agent role |
+| `span_id`, `parent_span_id` | `str \| None` | Trace-v2 span identity and parent |
+| `tool_call_id` | `str \| None` | Trace-v2 provider tool-call identity |
+| `retry_of` | `int \| None` | Trace-v2 index of the retried step |
+| `error` | `StepError \| None` | Trace-v2 error type and optional message |
+| `exchange` | `Exchange \| None` | Trace-v2 request/response evidence |
 
+
+The extra trace-v2 types live in `attest._proto.types`: `StepError(type, message=None)`, `Exchange(request, response)`, `Turn(index, step_indices=[], span_id=None, input=None, output=None)` and `Handoff(from_agent, to_agent, step_index)`. Construct a schema-2 `Trace` directly or preserve one from capture when using this evidence; `TraceBuilder` still emits schema 1.
 ### Serialization
 
-Both `Trace` and `Step` provide `to_dict()` and `from_dict()` for JSON serialization:
+`Trace`, `Step` and `TraceMetadata` provide `to_dict()`. `Trace.from_dict()` reconstructs a trace and its nested steps; `Step` has no standalone `from_dict()` method. Import `Trace` from `attest` for the example below.
 
 ```python
 # Serialize
@@ -361,9 +373,10 @@ def orchestrator(builder, task):
             args={"query": task},
             result={"documents": ["doc1", "doc2"]},
         )
-        child.set_output(message="Found 2 relevant documents.")
+        child.set_output(message="Found 2 relevant documents.", documents=["doc1", "doc2"])
 
     with delegate("writer") as child:
+        child.set_input(documents=["doc1", "doc2"])
         child.add_llm_call(
             name="gpt-4.1",
             args={"messages": [{"role": "user", "content": "summarize docs"}]},

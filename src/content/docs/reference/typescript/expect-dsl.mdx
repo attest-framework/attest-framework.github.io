@@ -1,773 +1,254 @@
 ---
 title: "TypeScript Expect DSL"
-description: "Complete reference for attestExpect() and the ExpectChain fluent API in the TypeScript SDK."
+description: "TypeScript assertion methods, world contracts, and Vitest evaluation rules in Attest 1.1.0."
 ---
 
-import { Tabs, TabItem } from '@astrojs/starlight/components';
+Use `attestExpect()` to describe the output, tool calls and effects you expect from an agent. Building a chain only collects checks: pass it to `evaluate()` to run them and enforce the test result. The API mirrors the [Python DSL](/reference/python/expect-dsl/) with camelCase methods and option objects.
 
-> **Python equivalent:** [Python Expect DSL](/reference/python/expect-dsl/)
-
-The Expect DSL provides a fluent, chainable API to declare assertions against agent traces. Assertions are batched and sent to the Attest engine for evaluation.
-
-## Installation
+## Installation and Minimal Test
 
 ```bash
-npm install -D "@attest-ai/core@>=1.0.0" "@attest-ai/vitest@>=1.0.0" "vitest@^4"
+npm install -D "@attest-ai/core@>=1.1.0" "@attest-ai/vitest@>=1.1.0" "vitest@^4"
+npx attest doctor
+npx vitest run
 ```
 
-## Import
+On a cold `HOME`, run `npx attest doctor` before the first test: downloading the engine can exceed Vitest's default five-second first-test timeout. Configure the [Vitest integration](/getting-started/typescript/) for reporting and lifecycle checks.
 
 ```typescript
-import { attestExpect } from '@attest-ai/core';
-
-// Evaluate chains with the vitest integration
+import { TraceBuilder, attestExpect } from '@attest-ai/core';
 import { evaluate } from '@attest-ai/vitest';
-```
+import { it } from 'vitest';
 
-## `attestExpect()`
-
-Creates an `ExpectChain` for declaring assertions against an agent result or trace.
-
-```typescript
-function attestExpect(result: AgentResult | Trace): ExpectChain
-```
-
-**Parameters:**
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `result` | `AgentResult \| Trace` | The agent result or raw trace to assert against. A raw `Trace` is auto-wrapped in `AgentResult`. |
-
-**Returns:** `ExpectChain` — a fluent builder. Chain assertion methods, then pass to `evaluate()`.
-
-```typescript
-const chain = attestExpect(result)
-  .outputContains("hello")
-  .latencyUnder(5000)
-  .tokensUnder(1000);
-
-const evaluated = await evaluate(chain);
-expect(evaluated.passed).toBe(true);
-```
-
-## `ExpectChain` Properties
-
-### `assertions`
-
-```typescript
-get assertions(): Assertion[]
-```
-
-Returns a copy of all assertions added to the chain.
-
-### `trace`
-
-```typescript
-get trace(): Trace
-```
-
-Returns the underlying trace from the wrapped `AgentResult`.
-
----
-
-## Layer 1: Schema Assertions
-
-Schema assertions validate structural properties of output and tool interactions using JSON Schema.
-
-### `outputMatchesSchema()`
-
-Validates the entire structured output against a JSON Schema.
-
-```typescript
-outputMatchesSchema(schema: Record<string, unknown>): this
-```
-
-```typescript
-attestExpect(result).outputMatchesSchema({
-  type: "object",
-  required: ["name", "age"],
-  properties: {
-    name: { type: "string" },
-    age: { type: "number", minimum: 0 },
-  },
+it('greets the user', async (context) => {
+  const trace = new TraceBuilder('greeter').setOutput({ message: 'Hello' }).build();
+  await evaluate(attestExpect(trace).outputContains('hello'), { context });
 });
 ```
 
-### `outputFieldMatchesSchema()`
+## Chains and Evaluation
 
-Validates a single field of the output against a JSON Schema.
+`attestExpect(result: AgentResult | Trace): ExpectChain` accepts a result or raw trace. It wraps a raw trace in an `AgentResult`. Assertion methods return the chain.
+
+| Property | Type | Meaning |
+|---|---|---|
+| `assertions` | `Assertion[]` | Copy of collected assertions |
+| `trace` | `Trace` | Underlying trace |
+| `evaluated` | `boolean` | The current assertion list was submitted for evaluation |
+
+Import `evaluate`, `inspect`, and `useAttest` from `@attest-ai/vitest`.
+
+| Function | Behavior |
+|---|---|
+| `await evaluate(chain, options?)` | Evaluate, then enforce; returns `AgentResult` if the test continues |
+| `await inspect(chain, options?)` | Evaluate without enforcing the assertion outcome |
+| `useAttest().enforce(verdict, options?)` | Enforce an inspected result or aggregate trial verdict |
+
+`inspect` options are `budget?: number` (cumulative session-cost limit in USD), `testBudget?: { maxJudgeCalls?: number; maxCostUsd?: number }` (this test's model-call limits), and `context?: TestContext`. `evaluate` additionally accepts `strict?: boolean`, defaulting to `ATTEST_STRICT` (`1`, `true`, or `yes`). Enforcement accepts `strict` and `context`. Exceeding the session `budget` can still throw from `inspect()`.
+
+Any `hard_fail` fails. Otherwise `not_evaluated` skips (fails under strict); otherwise the test passes, including soft failures. Pass `{ context }` under `it.concurrent` and for skips on Vitest before 4.1. During a trial of `trials()` with multiple runs, enforcement is deferred to the aggregate verdict.
+
+**In 1.1.0 the configured Vitest integration fails an otherwise passing test that leaves an assertion chain unevaluated.** This includes assertions appended after evaluation and chains in concurrent tests. Submit the final chain with `evaluate()` or `inspect()`; inspecting is not the same as enforcing. Evaluation assigns stable assertion IDs (scheme 2) from test scope, type, specification and occurrence rather than the position among unrelated checks.
+
+## Layer 1: Schema
+
+Schema methods do not accept a soft option.
+
+| Method | Parameters | Target |
+|---|---|---|
+| `outputMatchesSchema` | `schema: Record<string, unknown>` | `output.structured`, not the whole output |
+| `outputFieldMatchesSchema` | `field: string, schema: Record<string, unknown>` | `output.<field>` |
+| `toolArgsMatchSchema` | `toolName: string, schema: Record<string, unknown>` | Named steps' arguments |
+| `toolResultMatchesSchema` | `toolName: string, schema: Record<string, unknown>` | Named steps' results |
 
 ```typescript
-outputFieldMatchesSchema(field: string, schema: Record<string, unknown>): this
-```
-
-```typescript
-attestExpect(result).outputFieldMatchesSchema("recommendations", {
-  type: "array",
-  items: { type: "string" },
-  minItems: 1,
+it('returns structured output', async (context) => {
+  const trace = new TraceBuilder().setOutput({ structured: { answer: 42 } }).build();
+  await evaluate(attestExpect(trace).outputMatchesSchema({
+    type: 'object', required: ['answer'],
+    properties: { answer: { type: 'integer' } },
+  }), { context });
 });
 ```
 
-### `toolArgsMatchSchema()`
+## Layer 2: Constraints
 
-Validates the arguments passed to a specific tool call.
+Each method accepts a final optional `{ soft?: boolean }` object, defaulting to `false`, unless a fuller option object is shown.
+
+| Method | Parameters | Check |
+|---|---|---|
+| `costUnder` | `maxCost: number` | `metadata.cost_usd <= maxCost` |
+| `latencyUnder` | `maxMs: number` | `metadata.latency_ms <= maxMs` |
+| `tokensUnder` | `maxTokens: number` | `metadata.total_tokens <= maxTokens` |
+| `tokensBetween` | `minTokens: number, maxTokens: number` | Inclusive range |
+| `stepCount` | `operator: string, value: number` | Number of steps |
+| `toolCallCount` | `operator: string, value: number` | Number of `tool_call` steps |
+| `constraint` | `field: string, operator: string, opts?: { value?: number; min?: number; max?: number; soft?: boolean }` | Generic numeric constraint |
+
+Use `eq`, `lt`, `lte`, `gt`, or `gte` with a value; use `between` with `constraint`'s `min` and `max`. Missing metrics are not measured zeroes: populate the metadata a constraint needs.
 
 ```typescript
-toolArgsMatchSchema(toolName: string, schema: Record<string, unknown>): this
+const chain = attestExpect(trace)
+  .costUnder(0.10)
+  .tokensBetween(100, 500)
+  .constraint('metadata.latency_ms', 'lte', { value: 5000, soft: true });
 ```
 
+## Layer 3: Trace Checks
+
+The original trace checks match **all step names**, not only tools. They accept final `opts?: { soft?: boolean }`.
+
+| Method | Parameters | Check |
+|---|---|---|
+| `toolsCalledInOrder` | `tools: string[]` | Ordered subsequence; other steps may occur between |
+| `toolsCalledExactly` | `tools: string[]` | Contiguous subsequence; other steps may occur before/after |
+| `requiredTools` | `tools: string[]` | All names occur |
+| `forbiddenTools` | `tools: string[]` | No listed name occurs |
+| `noToolLoops` | `tool: string, maxRepetitions = 1` | Bound total occurrences of a name, not just consecutive repeats |
+| `noDuplicateTools` | No positional arguments | No step name repeats |
+
+### Behavior Contracts
+
+These methods examine only `tool_call` steps; retries count as calls.
+
+| Method | Parameters after the method name |
+|---|---|
+| `toolCardinality` | `(tool: string, opts: { per?: string; atMost?: number; atLeast?: number; soft?: boolean })` |
+| `trajectory` | `(tools: string[], opts?: { mode?: "strict" \| "unordered" \| "subset" \| "superset"; soft?: boolean })` |
+| `trajectoryPartialOrder` | `(order: [string, string][], opts?: { tools?: string[]; soft?: boolean })` |
+| `toolCalledBefore` | `(before: string, after: string, opts?: { soft?: boolean })` |
+| `noToolCycles` | `(period: number, opts?: { minRepeats?: number; soft?: boolean })` |
+| `maxToolFailureStreak` | `(maxStreak: number, opts?: { soft?: boolean })` |
+| `toolArgSatisfies` | `(tool: string, arg: string, op: "eq" \| "ne" \| "lt" \| "lte" \| "gt" \| "gte" \| "in" \| "not_in", value: unknown, opts?: { soft?: boolean })` |
+
+`toolCardinality` requires `atMost`, `atLeast`, or both, optionally grouped by the `per` argument path. `trajectory` defaults to `strict` (same sequence); `unordered` means the same calls in any order; `subset` permits no calls outside the list; `superset` requires all listed calls. Partial order requires every tool named by its pairs or optional `tools`, plus the before/after constraints.
+
+`toolCalledBefore` requires an earlier `before` for each `after`, but passes if there is no `after`. Argument predicates use a dot path into arguments and pass when the tool is absent; add a cardinality minimum when existence matters. `noToolCycles` checks repeated blocks with a period of 1–4 and defaults to two repeats. Failure streak checks require trace-v2 error evidence. Missing required argument/error evidence is `not_evaluated: missing_evidence`.
+
 ```typescript
-attestExpect(result).toolArgsMatchSchema("search", {
-  type: "object",
-  required: ["query"],
-  properties: {
-    query: { type: "string", minLength: 1 },
-  },
+it('issues at most one refund per order', async (context) => {
+  const trace = new TraceBuilder('refund')
+    .addToolCall('check_eligibility', { args: { order_id: 'O-1042' } })
+    .addToolCall('issue_refund', { args: { order_id: 'O-1042', amount_cents: 500 } })
+    .setOutput({ message: 'Refund issued' }).build();
+  await evaluate(attestExpect(trace)
+    .toolCardinality('issue_refund', { per: 'order_id', atMost: 1 })
+    .toolCalledBefore('check_eligibility', 'issue_refund')
+    .toolArgSatisfies('issue_refund', 'amount_cents', 'lte', 500), { context });
 });
 ```
 
-### `toolResultMatchesSchema()`
+## Layer 3: World and Effect Contracts
 
-Validates the result returned by a specific tool call.
+A tool call is an attempt; a world snapshot shows the resulting state. `chain.world(snapshot: Record<string, unknown> | null)` returns `WorldChecks`. Each effect check returns the **parent chain**. Obtain the snapshot from `await world.state()` or `await world.stop()` with the [world helper](/sdk-guides/world-fixtures/); `null` becomes `not_evaluated: missing_evidence`.
+
+| Method | Parameters |
+|---|---|
+| `count` | `(resource: string, opts: { equals?: number; atMost?: number; atLeast?: number; where?: Record<string, unknown> })` |
+| `unique` | `(resource: string, opts: { by: string \| string[]; where?: Record<string, unknown> })` |
+| `idempotent` | `(resource: string, opts?: { key?: string; where?: Record<string, unknown> })` |
+| `sum` | `(resource: string, field: string, opts: { atMost: number \| Related; where?: Record<string, unknown> })` |
+| `matches` | `(resource: string, field: string, rel: Related, opts?: { where?: Record<string, unknown> })` |
+
+`count` needs `equals` or at least one bound; do not combine `equals` with another bound. `where` is an exact-match filter. `unique` checks distinct values of one or several fields; `idempotent` defaults to the field `idempotency_key`. Effects have no soft option.
+
+Import `related` from `@attest-ai/core`. `related(resource: string, field: string, opts: { on: string }): Related` names a record in another resource joined on a shared key. A numeric `sum` bound checks the filtered total. A related bound checks each join-key group's total against its corresponding record; `matches` compares each selected record's field to its corresponding field.
 
 ```typescript
-toolResultMatchesSchema(toolName: string, schema: Record<string, unknown>): this
-```
+import { related } from '@attest-ai/core';
 
-```typescript
-attestExpect(result).toolResultMatchesSchema("search", {
-  type: "object",
-  required: ["results"],
-  properties: {
-    results: { type: "array" },
-  },
+// In your test, after obtaining the world's snapshot:
+const chain = attestExpect(trace);
+chain.world(snapshot).count('refunds', { equals: 1, where: { order_id: 'O-1042' } });
+chain.world(snapshot).unique('refunds', { by: 'idempotency_key' });
+chain.world(snapshot).idempotent('refunds');
+chain.world(snapshot).sum('refunds', 'amount_cents', {
+  atMost: related('orders', 'amount_cents', { on: 'order_id' }),
 });
+chain.world(snapshot).matches('notifications', 'customer_id',
+  related('orders', 'customer_id', { on: 'order_id' }));
+await evaluate(chain, { context });
 ```
 
----
+Invalid snapshots, absent resources, non-numeric sum evidence and ambiguous related keys fail rather than pass; a missing corresponding record is a relational violation. Empty selected records can satisfy a bound: add `count` when records must exist. The SDK rejects chains whose repeated snapshot payloads exceed 9 MiB.
 
-## Layer 2: Constraint Assertions
+## Layer 4: Content
 
-Constraint assertions enforce numeric bounds on cost, latency, tokens, and step counts. All support a `soft` option: soft failures are warnings, not test failures.
+Output helpers target `output.message`. Matching defaults to case-insensitive. Each method returns the chain.
 
-### `costUnder()`
+| Method | Parameters |
+|---|---|
+| `outputContains` | `(value: string, opts?: { caseSensitive?: boolean; soft?: boolean })` |
+| `outputNotContains` | `(value: string, opts?: { caseSensitive?: boolean; soft?: boolean })` |
+| `outputMatchesRegex` | `(pattern: string, opts?: { soft?: boolean })` |
+| `outputHasAllKeywords` | `(keywords: string[], opts?: { caseSensitive?: boolean; soft?: boolean })` |
+| `outputHasAnyKeyword` | `(keywords: string[], opts?: { caseSensitive?: boolean; soft?: boolean })` |
+| `outputForbids` | `(terms: string[])`; no soft option |
+| `contentContains` | `(target: string, value: string, opts?: { caseSensitive?: boolean; soft?: boolean })` |
 
-Asserts total cost is at or below a threshold (USD).
-
-```typescript
-costUnder(maxCost: number, opts?: { soft?: boolean }): this
-```
-
-```typescript
-attestExpect(result).costUnder(0.05);
-attestExpect(result).costUnder(0.10, { soft: true }); // warning only
-```
-
-### `latencyUnder()`
-
-Asserts total latency is at or below a threshold (milliseconds).
-
-```typescript
-latencyUnder(maxMs: number, opts?: { soft?: boolean }): this
-```
-
-```typescript
-attestExpect(result).latencyUnder(3000);
-```
-
-### `tokensUnder()`
-
-Asserts total token usage is at or below a threshold.
-
-```typescript
-tokensUnder(maxTokens: number, opts?: { soft?: boolean }): this
-```
-
-```typescript
-attestExpect(result).tokensUnder(2000);
-```
-
-### `tokensBetween()`
-
-Asserts total token usage falls within a range (inclusive).
-
-```typescript
-tokensBetween(minTokens: number, maxTokens: number, opts?: { soft?: boolean }): this
-```
-
-```typescript
-attestExpect(result).tokensBetween(100, 2000);
-```
-
-### `stepCount()`
-
-Asserts the total number of steps matches an operator/value pair.
-
-```typescript
-stepCount(operator: string, value: number, opts?: { soft?: boolean }): this
-```
-
-Supported operators: `"eq"`, `"lte"`, `"gte"`, `"lt"`, `"gt"`, `"between"`.
-
-```typescript
-attestExpect(result).stepCount("lte", 5);
-attestExpect(result).stepCount("eq", 3);
-```
-
-### `toolCallCount()`
-
-Asserts the number of tool call steps matches an operator/value pair.
-
-```typescript
-toolCallCount(operator: string, value: number, opts?: { soft?: boolean }): this
-```
-
-```typescript
-attestExpect(result).toolCallCount("gte", 1);
-attestExpect(result).toolCallCount("lte", 3);
-```
-
-### `constraint()`
-
-Generic constraint for arbitrary trace fields.
-
-```typescript
-constraint(
-  field: string,
-  operator: string,
-  opts?: { value?: number; min?: number; max?: number; soft?: boolean },
-): this
-```
-
-```typescript
-attestExpect(result).constraint("metadata.cost_usd", "lte", { value: 0.01 });
-attestExpect(result).constraint("metadata.total_tokens", "between", {
-  min: 50,
-  max: 500,
-});
-```
-
----
-
-## Layer 3: Trace Assertions
-
-Trace assertions validate the sequence and composition of tool calls within a trace.
-
-### `toolsCalledInOrder()`
-
-Asserts that the named tools appear in the trace in the given order (other tools may appear between them).
-
-```typescript
-toolsCalledInOrder(tools: string[], opts?: { soft?: boolean }): this
-```
-
-```typescript
-attestExpect(result).toolsCalledInOrder(["search", "summarize"]);
-```
-
-### `toolsCalledExactly()`
-
-Asserts the exact ordered sequence of tool calls — no extra tools allowed.
-
-```typescript
-toolsCalledExactly(tools: string[], opts?: { soft?: boolean }): this
-```
-
-```typescript
-attestExpect(result).toolsCalledExactly(["search", "rank", "format"]);
-```
-
-### `noToolLoops()`
-
-Asserts a tool is not called more than `maxRepetitions` consecutive times.
-
-```typescript
-noToolLoops(tool: string, maxRepetitions?: number, opts?: { soft?: boolean }): this
-```
-
-```typescript
-attestExpect(result).noToolLoops("retry_fetch", 2);
-```
-
-### `noDuplicateTools()`
-
-Asserts no tool is called more than once across the entire trace.
-
-```typescript
-noDuplicateTools(opts?: { soft?: boolean }): this
-```
-
-```typescript
-attestExpect(result).noDuplicateTools();
-```
-
-### `requiredTools()`
-
-Asserts that all specified tools appear in the trace (in any order).
-
-```typescript
-requiredTools(tools: string[], opts?: { soft?: boolean }): this
-```
-
-```typescript
-attestExpect(result).requiredTools(["validate_input", "generate_response"]);
-```
-
-### `forbiddenTools()`
-
-Asserts that none of the specified tools appear in the trace.
-
-```typescript
-forbiddenTools(tools: string[], opts?: { soft?: boolean }): this
-```
-
-```typescript
-attestExpect(result).forbiddenTools(["delete_user", "drop_table"]);
-```
-
----
-
-## Layer 4: Content Assertions
-
-Content assertions inspect the textual content of outputs.
-
-### `outputContains()`
-
-Asserts the output message contains a substring.
-
-```typescript
-outputContains(value: string, opts?: { caseSensitive?: boolean; soft?: boolean }): this
-```
-
-```typescript
-attestExpect(result).outputContains("recommendation");
-attestExpect(result).outputContains("JSON", { caseSensitive: true });
-```
-
-### `outputNotContains()`
-
-Asserts the output message does not contain a substring.
-
-```typescript
-outputNotContains(value: string, opts?: { caseSensitive?: boolean; soft?: boolean }): this
-```
-
-```typescript
-attestExpect(result).outputNotContains("error");
-```
-
-### `outputMatchesRegex()`
-
-Asserts the output message matches a regular expression pattern.
-
-```typescript
-outputMatchesRegex(pattern: string, opts?: { soft?: boolean }): this
-```
-
-```typescript
-attestExpect(result).outputMatchesRegex("\\d{3}-\\d{4}");
-```
-
-### `outputHasAllKeywords()`
-
-Asserts the output contains all specified keywords.
-
-```typescript
-outputHasAllKeywords(
-  keywords: string[],
-  opts?: { caseSensitive?: boolean; soft?: boolean },
-): this
-```
-
-```typescript
-attestExpect(result).outputHasAllKeywords(["price", "availability", "shipping"]);
-```
-
-### `outputHasAnyKeyword()`
-
-Asserts the output contains at least one of the specified keywords.
-
-```typescript
-outputHasAnyKeyword(
-  keywords: string[],
-  opts?: { caseSensitive?: boolean; soft?: boolean },
-): this
-```
-
-```typescript
-attestExpect(result).outputHasAnyKeyword(["yes", "confirmed", "approved"]);
-```
-
-### `outputForbids()`
-
-Asserts the output does not contain any of the specified terms. Always a hard failure.
-
-```typescript
-outputForbids(terms: string[]): this
-```
-
-```typescript
-attestExpect(result).outputForbids(["password", "ssn", "credit card"]);
-```
-
-### `contentContains()`
-
-Generic content check against an arbitrary trace target path.
-
-```typescript
-contentContains(
-  target: string,
-  value: string,
-  opts?: { caseSensitive?: boolean; soft?: boolean },
-): this
-```
-
-```typescript
-attestExpect(result).contentContains("steps[0].result.completion", "success");
-```
-
----
-
-## Layer 5: Embedding Similarity
-
-Embedding assertions compare semantic similarity between the output and a reference string. Requires an embedding provider.
-
-### `outputSimilarTo()`
-
-Asserts the output is semantically similar to a reference text.
-
-```typescript
-outputSimilarTo(
-  reference: string,
-  opts?: { threshold?: number | "dynamic"; model?: string; soft?: boolean },
-): this
-```
-
-| Option      | Type                    | Default          | Description                                                                        |
-| ----------- | ----------------------- | ---------------- | ---------------------------------------------------------------------------------- |
-| `threshold` | `number \| "dynamic"`   | `0.8`            | Minimum cosine similarity score (0.0 to 1.0), or `"dynamic"` for the history-based bar |
-| `model`     | `string`                | Provider default | Embedding model override                                                           |
-| `soft`      | `boolean`               | `false`          | Treat failure as warning                                                           |
-
-```typescript
-attestExpect(result).outputSimilarTo(
-  "The product is available and ships within 2 business days",
-  { threshold: 0.85 },
-);
-
-// Dynamic threshold — engine compares against historical mean ± σ
-attestExpect(result).outputSimilarTo("reference text", { threshold: "dynamic" });
-```
-
-:::note
-Layer 5 assertions incur API costs for embedding generation. Use deterministic layers (1-4) when possible.
-:::
-
----
-
-## Layer 6: LLM Judge
-
-LLM judge assertions use a language model to evaluate output quality against criteria. Most expensive assertion layer.
-
-### `passesJudge()`
-
-Asserts the output passes an LLM judge evaluation.
-
-```typescript
-passesJudge(
-  criteria: string,
-  opts?: { rubric?: string; threshold?: number | "dynamic"; model?: string; soft?: boolean },
-): this
-```
-
-| Option      | Type                    | Default          | Description                                                                 |
-| ----------- | ----------------------- | ---------------- | --------------------------------------------------------------------------- |
-| `rubric`    | `string`                | `"default"`      | Evaluation rubric name                                                      |
-| `threshold` | `number \| "dynamic"`   | `0.8`            | Minimum judge score (0.0 to 1.0), or `"dynamic"` for the history-based bar |
-| `model`     | `string`                | Provider default | Judge model override                                                        |
-| `soft`      | `boolean`               | `false`          | Treat failure as warning                                                    |
-
-```typescript
-attestExpect(result).passesJudge(
-  "Response is helpful, accurate, and addresses all parts of the user question",
-  { threshold: 0.9 },
-);
-
-// Dynamic threshold — catch regressions without picking an absolute number
-attestExpect(result).passesJudge("is polite", { threshold: "dynamic" });
-
-attestExpect(result).passesJudge("Response does not contain hallucinated facts", {
-  rubric: "factuality",
-  model: "gpt-4.1",
-});
-```
-
-:::note
-Layer 6 assertions incur LLM API costs. Use deterministic layers (1-4) before resorting to judge assertions.
-:::
-
----
-
-## Trace Tree (Multi-Agent, Layer 3)
-
-Trace tree assertions validate multi-agent delegation patterns, cross-agent data flow, and aggregate metrics across the full agent tree.
-
-### `agentCalled()`
-
-Asserts a specific agent was invoked somewhere in the trace tree.
-
-```typescript
-agentCalled(agentId: string, opts?: { soft?: boolean }): this
-```
-
-```typescript
-attestExpect(result).agentCalled("researcher");
-```
-
-### `delegationDepth()`
-
-Asserts the maximum delegation depth does not exceed a limit.
-
-```typescript
-delegationDepth(maxDepth: number, opts?: { soft?: boolean }): this
-```
-
-```typescript
-attestExpect(result).delegationDepth(3);
-```
-
-### `agentOutputContains()`
-
-Asserts a specific agent's output contains a substring.
-
-```typescript
-agentOutputContains(
-  agentId: string,
-  value: string,
-  opts?: { caseSensitive?: boolean; soft?: boolean },
-): this
-```
-
-```typescript
-attestExpect(result).agentOutputContains("summarizer", "conclusion");
-```
-
-### `crossAgentDataFlow()`
-
-Asserts data flows from one agent to another through a specific field.
-
-```typescript
-crossAgentDataFlow(
-  fromAgent: string,
-  toAgent: string,
-  field: string,
-  opts?: { soft?: boolean },
-): this
-```
-
-```typescript
-attestExpect(result).crossAgentDataFlow("researcher", "writer", "findings");
-```
-
-### `followsTransitions()`
-
-Asserts the agent delegation graph contains specific parent-child transitions.
-
-```typescript
-followsTransitions(transitions: [string, string][], opts?: { soft?: boolean }): this
-```
-
-```typescript
-attestExpect(result).followsTransitions([
-  ["orchestrator", "researcher"],
-  ["orchestrator", "writer"],
-]);
-```
-
-### `aggregateCostUnder()`
-
-Asserts the total cost across all agents in the tree is at or below a threshold.
-
-```typescript
-aggregateCostUnder(maxCost: number, opts?: { soft?: boolean }): this
-```
-
-```typescript
-attestExpect(result).aggregateCostUnder(0.50);
-```
-
-### `aggregateTokensUnder()`
-
-Asserts the total token usage across all agents in the tree is at or below a threshold.
-
-```typescript
-aggregateTokensUnder(maxTokens: number, opts?: { soft?: boolean }): this
-```
-
-```typescript
-attestExpect(result).aggregateTokensUnder(10000);
-```
-
-### `agentOrderedBefore()`
-
-Asserts one agent completed before another started.
-
-```typescript
-agentOrderedBefore(agentA: string, agentB: string, opts?: { soft?: boolean }): this
-```
-
-```typescript
-attestExpect(result).agentOrderedBefore("planner", "executor");
-```
-
-### `agentsOverlap()`
-
-Asserts two agents had overlapping execution windows (ran concurrently).
-
-```typescript
-agentsOverlap(agentA: string, agentB: string, opts?: { soft?: boolean }): this
-```
-
-```typescript
-attestExpect(result).agentsOverlap("researcher_a", "researcher_b");
-```
-
-### `agentWallTimeUnder()`
-
-Asserts a specific agent's wall-clock execution time is under a threshold.
-
-```typescript
-agentWallTimeUnder(agentId: string, maxMs: number, opts?: { soft?: boolean }): this
-```
-
 ```typescript
-attestExpect(result).agentWallTimeUnder("summarizer", 5000);
+const chain = attestExpect(trace)
+  .outputContains('refund')
+  .outputForbids(['password', 'ssn'])
+  .contentContains('output.message', 'issued');
 ```
-
-### `orderedAgents()`
 
-Asserts agents execute in ordered groups. Agents within the same group may run in any order, but groups execute sequentially.
+## Layers 5–6: Semantic Checks
 
 ```typescript
-orderedAgents(groups: string[][], opts?: { soft?: boolean }): this
+outputSimilarTo(reference: string,
+  opts?: { threshold?: number | 'dynamic'; model?: string; soft?: boolean }): this
+passesJudge(criteria: string,
+  opts?: { rubric?: string; threshold?: number | 'dynamic'; model?: string; soft?: boolean }): this
 ```
 
-```typescript
-attestExpect(result).orderedAgents([
-  ["planner"],                         // Phase 1
-  ["researcher_a", "researcher_b"],    // Phase 2 (parallel)
-  ["writer"],                          // Phase 3
-]);
-```
+Both target `output.message`, default `threshold` to `0.8` and `soft` to `false`. The judge's default rubric is `"default"`; `model` overrides the provider default. Layer 5 requires an embedding provider (local ONNX or hosted OpenAI); Layer 6 requires a judge. Hosted calls can cost money. See [Configuration](/reference/configuration/) for providers, timeouts, request and USD budgets.
 
----
-
-## Full Example
-
 ```typescript
-import { attestExpect, agent, TraceBuilder } from '@attest-ai/core';
-import { evaluate } from '@attest-ai/vitest';
-import { describe, it, expect } from 'vitest';
-
-const myAgent = agent("assistant", (builder, args) => {
-  builder.addLlmCall("gpt-4.1", {
-    args: { prompt: args.question },
-    result: { completion: "Paris is the capital of France." },
-  });
-  builder.addToolCall("fact_check", {
-    args: { claim: "Paris is the capital of France" },
-    result: { verified: true },
-  });
-  return { message: "Paris is the capital of France." };
-});
-
-describe("assistant agent", () => {
-  it("produces correct, efficient output", async () => {
-    const result = myAgent({ question: "What is the capital of France?" });
-
-    const chain = attestExpect(result)
-      // Layer 1: Schema
-      .outputMatchesSchema({
-        type: "object",
-        required: ["message"],
-        properties: { message: { type: "string" } },
-      })
-      // Layer 2: Constraints
-      .tokensUnder(500)
-      .costUnder(0.01)
-      // Layer 3: Trace
-      .requiredTools(["fact_check"])
-      .forbiddenTools(["delete_data"])
-      // Layer 4: Content
-      .outputContains("Paris")
-      .outputNotContains("error");
-
-    const evaluated = await evaluate(chain);
-    expect(evaluated.passed).toBe(true);
-  });
-});
+const chain = attestExpect(trace)
+  .outputSimilarTo('The refund was issued', { threshold: 0.85 })
+  .passesJudge('The answer clearly explains the refund', { rubric: 'default' });
 ```
-
----
-
-## Assertion Layer Summary
-
-| Layer | Type | Cost | Methods |
-|-------|------|------|---------|
-| 1 | Schema | Free | `outputMatchesSchema`, `outputFieldMatchesSchema`, `toolArgsMatchSchema`, `toolResultMatchesSchema` |
-| 2 | Constraint | Free | `costUnder`, `latencyUnder`, `tokensUnder`, `tokensBetween`, `stepCount`, `toolCallCount`, `constraint` |
-| 3 | Trace | Free | `toolsCalledInOrder`, `toolsCalledExactly`, `noToolLoops`, `noDuplicateTools`, `requiredTools`, `forbiddenTools` |
-| 4 | Content | Free | `outputContains`, `outputNotContains`, `outputMatchesRegex`, `outputHasAllKeywords`, `outputHasAnyKeyword`, `outputForbids`, `contentContains` |
-| 5 | Embedding | Paid | `outputSimilarTo` |
-| 6 | LLM Judge | Paid | `passesJudge` |
-| 7 | Trace Tree | Free | `agentCalled`, `delegationDepth`, `agentOutputContains`, `crossAgentDataFlow`, `followsTransitions`, `aggregateCostUnder`, `aggregateTokensUnder`, `agentOrderedBefore`, `agentsOverlap`, `agentWallTimeUnder`, `orderedAgents` |
-| 8 | Plugin | Varies | `plugin`, `aggregateLatencyUnder`, `allToolsCalled` |
-
----
-
-## Plugin Assertions
-
-*Added in v0.5.1*
 
-### `plugin()`
+An abstaining judge, malformed reply, rejected credential or provider failure is `not_evaluated`, never an invented passing score. Only transient failures are retried. Simulation evaluates deterministic checks but returns `not_evaluated: simulation` for Layers 5–6. Strict mode fails rather than skips unevaluated tests; for report policy, change the default `not_evaluated: warn` to `not_evaluated: block` when CI must reject those rows.
 
-Chain a registered plugin evaluation alongside built-in assertions.
+`threshold: 'dynamic'` uses the latest 50 passing or soft-failing scores for the stable assertion ID. With at least 10 scores the bar is `max(0.8, mean − 2·max(σ, 0.02))`; otherwise `0.8`. Pre-1.1 ordinal-ID history does not match the new stable IDs, so baselines rebuild. See [Drift Detection](/guides/drift-detection/).
 
-```typescript
-plugin(
-  pluginId: string,
-  config?: Record<string, unknown>,
-  opts?: { soft?: boolean },
-): this
-```
+## Trace Tree Checks (Layer 3)
 
-```typescript
-attestExpect(result).plugin("toxicity-check", { threshold: 0.9 });
-```
+These operate on nested `agent_call` steps. All accept final `opts?: { soft?: boolean }`, except that `agentOutputContains` also supports `caseSensitive?: boolean` in that object.
 
-See [Writing a Plugin](/tutorials/writing-plugin/) for registration details.
+| Method | Parameters before options |
+|---|---|
+| `agentCalled` | `agentId: string` |
+| `delegationDepth` | `maxDepth: number` (root depth 0) |
+| `agentOutputContains` | `agentId: string, value: string` |
+| `crossAgentDataFlow` | `fromAgent: string, toAgent: string, field: string` |
+| `followsTransitions` | `transitions: [string, string][]` |
+| `aggregateCostUnder` | `maxCost: number` |
+| `aggregateTokensUnder` | `maxTokens: number` |
+| `agentOrderedBefore` | `agentA: string, agentB: string` |
+| `agentsOverlap` | `agentA: string, agentB: string` |
+| `agentWallTimeUnder` | `agentId: string, maxMs: number` |
+| `orderedAgents` | `groups: string[][]` |
 
-### `aggregateLatencyUnder()`
+Ordering and overlap need recorded step timestamps. Use [TraceBuilder and TraceTree](/reference/typescript/trace-builder/) to construct and inspect nested traces.
 
-Asserts total latency across all steps of the trace tree is at or below a threshold (milliseconds).
+## Plugins
 
-```typescript
-aggregateLatencyUnder(maxMs: number, opts?: { soft?: boolean }): this
-```
+`plugin(pluginId: string, config?: Record<string, unknown>, opts?: { soft?: boolean }): this` invokes a registered assertion plugin. The built-in plugin helpers `aggregateLatencyUnder(maxMs, opts?)` and `allToolsCalled(toolNames, opts?)` check summed trace-tree latency and tools across the whole tree; both accept `{ soft?: boolean }`.
 
 ```typescript
-attestExpect(result).aggregateLatencyUnder(5000);
+const chain = attestExpect(trace)
+  .aggregateLatencyUnder(5000)
+  .allToolsCalled(['search', 'summarize'])
+  .plugin('my_plugin', { threshold: 0.9 });
 ```
 
-### `allToolsCalled()`
+See [Writing a Plugin](/tutorials/writing-plugin/) for registration and explicit package discovery.
 
-Asserts that every tool in the list was called at least once.
+## Soft Failures and Results
 
-```typescript
-allToolsCalled(toolNames: string[], opts?: { soft?: boolean }): this
-```
+Only methods that expose `soft` accept it. Schema, effect methods and `outputForbids` do not. A `soft_fail` records a warning without itself failing the test; it does not turn unavailable evidence or providers into a pass. A session soft-failure limit can still fail a batch.
 
-```typescript
-attestExpect(result).allToolsCalled(["search", "summarize", "format"]);
-```
+The returned `AgentResult` exposes `outcome()`, `hardFailures`, `softFailures`, `notEvaluated`, and diagnostic helpers. `passed` is stricter than the test verdict: it is true only when every assertion passed. See [AgentResult](/reference/typescript/agent-class/#agentresult).

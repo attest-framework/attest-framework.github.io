@@ -1,389 +1,119 @@
 ---
 title: "Adapter System"
-description: "Two-tier adapter architecture for capturing traces from LLM providers and agent frameworks."
+description: "How Attest 1.1.0 adapters turn provider responses and framework events into traces."
 ---
 
-Attest uses a two-tier adapter architecture to capture traces from both LLM provider SDKs and agent orchestration frameworks. All adapters produce the same canonical `Trace` format, making the assertion pipeline framework-agnostic.
+Adapters translate provider responses or framework events into Attest's common `Trace` format. Choose one that records the evidence your assertions need: a provider response alone does not describe an entire agent workflow or prove a tool's external effects.
 
-## Architecture
+## Integration types
 
-```mermaid
-flowchart TB
-    subgraph TIER1["Tier 1: Provider Adapters"]
-        direction LR
-        OAI["OpenAI<br/>Adapter"]
-        ANT["Anthropic<br/>Adapter"]
-        GEM["Gemini<br/>Adapter"]
-        OLL["Ollama<br/>Adapter"]
-    end
-
-    subgraph TIER2["Tier 2: Framework Adapters"]
-        direction LR
-        LC["LangChain<br/>Adapter"]
-        ADK["Google ADK<br/>Adapter"]
-        CR["CrewAI<br/>Adapter"]
-        LI["LlamaIndex<br/>Adapter"]
-    end
-
-    subgraph SPECIAL["Special Adapters"]
-        direction LR
-        MAN["Manual<br/>Adapter"]
-        OTEL["OTel<br/>Adapter"]
-    end
-
-    OAI --> CT["Canonical Trace"]
-    ANT --> CT
-    GEM --> CT
-    OLL --> CT
-    LC --> CT
-    ADK --> CT
-    CR --> CT
-    LI --> CT
-    MAN --> CT
-    OTEL --> CT
-    CT --> ENGINE["Attest Engine<br/>Assertion Pipeline"]
-```
-
-The two tiers solve fundamentally different capture problems:
-
-| | Provider Adapters (Tier 1) | Framework Adapters (Tier 2) |
+| Type | Input | What it can establish |
 |---|---|---|
-| **Captures** | Individual LLM calls, token counts, tool use blocks | Tool call sequences, agent delegation trees, multi-step reasoning |
-| **Does not capture** | Agent orchestration, multi-step reasoning, parallel execution | Raw LLM request/response details |
-| **Complexity** | ~100 lines per adapter | ~200-400 lines per adapter |
-| **Hook mechanism** | Wraps LLM client SDK | Hooks into framework event system |
-| **Temporal data** | Wall-clock around LLM call | Framework event timestamps |
-| **Agent identity** | Not populated (single-agent context) | Populated from framework metadata |
+| Provider | A completed provider response and caller-supplied context | LLM output, reported tokens, requested tool calls |
+| Framework | Framework callbacks, events, or run summaries | The execution details actually exposed by that integration |
+| Manual | Steps supplied by your code | Whatever you explicitly record |
+| OpenTelemetry | Existing spans | What the spans and supported attributes contain |
 
-## Adapter Class Hierarchy
+These integration types are not the cost tiers (`TIER_1`–`TIER_3`) or maturity levels below. An adapter does not make unsupported evidence appear. In particular, a requested tool call is not proof that the tool ran, and missing cost or timing information is not a measured zero.
 
-```mermaid
-classDiagram
-    class BaseAdapter {
-        +str agent_id
-        #_create_builder() TraceBuilder
-        #_now_ms() int
-        #_resolve_timestamps() tuple
-    }
+## Provider response capture
 
-    class BaseProviderAdapter {
-        <<abstract>>
-        +trace_from_response() Trace
-        #_extract_completion()* str
-        #_extract_model()* str
-        #_extract_total_tokens()* int
-        #_extract_tool_calls()* list
-        #_extract_input() dict
-        #_build_output() dict
-    }
-
-    class OpenAIAdapter {
-        +trace_from_response() Trace
-    }
-    class AnthropicAdapter {
-        +trace_from_response() Trace
-    }
-    class GeminiAdapter {
-        +trace_from_response() Trace
-    }
-    class OllamaAdapter {
-        +trace_from_response() Trace
-    }
-
-    class LangChainAdapter {
-        +capture() LangChainCallbackHandler
-        +trace Trace
-    }
-    class GoogleADKAdapter {
-        +capture_async() Trace
-        +from_events() Trace
-    }
-    class CrewAIAdapter {
-        +capture()
-        +trace_from_crew_output() Trace
-    }
-    class LlamaIndexInstrumentationHandler {
-        +attach()
-        +detach()
-        +build_trace() Trace
-    }
-
-    class ManualAdapter {
-        +capture() Trace
-        +create_builder() TraceBuilder
-    }
-
-    class OTelAdapter {
-        +from_spans() Trace
-        +from_otel_span_dicts() Trace
-    }
-
-    BaseAdapter <|-- BaseProviderAdapter
-    BaseAdapter <|-- LangChainAdapter
-    BaseAdapter <|-- GoogleADKAdapter
-    BaseAdapter <|-- CrewAIAdapter
-    BaseAdapter <|-- LlamaIndexInstrumentationHandler
-    BaseAdapter <|-- ManualAdapter
-    BaseAdapter <|-- OTelAdapter
-    BaseProviderAdapter <|-- OpenAIAdapter
-    BaseProviderAdapter <|-- AnthropicAdapter
-    BaseProviderAdapter <|-- GeminiAdapter
-    BaseProviderAdapter <|-- OllamaAdapter
-```
-
-## Tier 1: Provider Adapters
-
-Provider adapters wrap LLM client SDKs to capture individual API calls. They use the **template method pattern** — `BaseProviderAdapter` defines the algorithm skeleton in `trace_from_response()`, and each subclass overrides extraction methods for its provider's response format.
-
-### BaseProviderAdapter
-
-The base class handles:
-1. Timestamp resolution (wall-clock fallbacks)
-2. TraceBuilder setup with agent ID
-3. Input extraction
-4. LLM call step construction (model, completion text, token count)
-5. Tool call extraction
-6. Output and metadata assembly
-
-Subclasses override four abstract methods:
-
-| Method | Returns | Purpose |
-|---|---|---|
-| `_extract_completion(response)` | `str` | Completion text from provider response |
-| `_extract_model(response)` | `str \| None` | Model identifier |
-| `_extract_total_tokens(response)` | `int \| None` | Total token count |
-| `_extract_tool_calls(response)` | `list[dict]` | Tool calls as `[{"name": ..., "args": ...}]` |
-
-Two optional overrides customize input/output handling:
-
-| Method | Default Behavior |
-|---|---|
-| `_extract_input(input_messages)` | Wraps in `{"messages": ...}` |
-| `_build_output(response, completion_text)` | Returns `{"message": completion_text}` |
-
-### Usage Pattern
+Python provider adapters share `BaseProviderAdapter.trace_from_response()`. It builds a trace from an existing response; it does not automatically wrap every client call. Supply the input and timestamps around the actual request when you need them:
 
 ```python
 from attest import OpenAIAdapter
-from openai import OpenAI
 
-client = OpenAI()
-adapter = OpenAIAdapter()
-
-# Capture timestamps around the API call
-import time
-started = int(time.time() * 1000)
-response = client.chat.completions.create(
-    model="gpt-4.1",
-    messages=[{"role": "user", "content": "What is 2+2?"}]
-)
-ended = int(time.time() * 1000)
-
-# Build trace from response
-trace = adapter.trace_from_response(
+# response and messages come from your application's completed provider call.
+trace = OpenAIAdapter(agent_id="support").trace_from_response(
     response,
-    input_messages=[{"role": "user", "content": "What is 2+2?"}],
+    input_messages=messages,
     started_at_ms=started,
     ended_at_ms=ended,
 )
 ```
 
-### Available Provider Adapters
+The base implementation resolves timestamps, creates a `TraceBuilder`, extracts completion/model/token data and tool calls, and assembles output and metadata. Missing timestamps fall back to the current time; those fallbacks do not measure the original request duration. The caller can supply metadata such as `cost_usd` and `latency_ms`.
 
-| Adapter | Provider | Import |
+OpenAI capture supports Chat Completions and Responses API response shapes. An OpenAI-compatible service must return a supported response shape; endpoint compatibility alone is not a guarantee of trace parity.
+
+### Custom Python provider adapters
+
+Subclass `BaseProviderAdapter` from `attest.adapters._base`. Its required extraction hooks are:
+
+| Hook | Return value |
+|---|---|
+| `_extract_completion(response)` | Completion string |
+| `_extract_model(response, **metadata)` | Model string or `None` |
+| `_extract_total_tokens(response)` | Token count or `None` |
+| `_extract_tool_calls(response)` | List of dictionaries with `name` and optional `args` |
+
+Optional hooks include `_extract_input(input_messages, **metadata)`, `_build_output(response, completion_text, **metadata)`, `_extract_token_split(response)`, and `_extract_refusal(response)`. Default output is `{"message": completion_text}`. Return unknown usage as absent rather than inventing measurements.
+
+## Framework capture
+
+Framework adapters have framework-specific entry points rather than one universal interception interface.
+
+| Python integration | Entry point | Evidence boundary |
 |---|---|---|
-| `OpenAIAdapter` | OpenAI (and compatible: Azure, Together AI, vLLM) | `from attest import OpenAIAdapter` |
-| `AnthropicAdapter` | Anthropic Claude | `from attest import AnthropicAdapter` |
-| `GeminiAdapter` | Google Gemini | `from attest import GeminiAdapter` |
-| `OllamaAdapter` | Ollama (local models) | `from attest import OllamaAdapter` |
+| LangChain | `with adapter.capture() as handler:`; pass `handler` in callbacks, then read `adapter.trace` | Captures supplied callback events |
+| Google ADK | `await adapter.capture_async(runner, user_id, session_id, message)` or `GoogleADKAdapter.from_events(events)` | Converts the runner's event stream |
+| CrewAI | `with adapter.capture() as cap:` then `cap.trace_from_crew_output(result, crew)` | **Summary-only:** final output, token usage, and latency; not per-tool/delegation evidence |
+| LlamaIndex | `with handler:` then `handler.build_trace(query=..., response=...)` | Captures supported instrumentation events |
 
-The `OpenAIAdapter` works with any OpenAI-compatible endpoint by configuring the client's `base_url`.
-
-## Tier 2: Framework Adapters
-
-Framework adapters integrate with agent orchestration frameworks to capture the full execution structure. They hook into framework-specific event systems — callbacks, event streams, or workflow interceptors.
-
-### Interface
-
-Framework adapters subclass `BaseAdapter` and expose a framework-specific capture entry point. Each hooks into the framework's native event system, collects events into a `TraceBuilder`, and returns the canonical `Trace`:
-
-| Adapter | Capture entry point | Returns |
-|---|---|---|
-| `LangChainAdapter` | `with adapter.capture() as handler:` then `adapter.trace` | `Trace` |
-| `GoogleADKAdapter` | `await adapter.capture_async(runner, user_id, session_id, message)` or `GoogleADKAdapter.from_events(events)` | `Trace` |
-| `CrewAIAdapter` | `with adapter.capture() as cap:` then `cap.trace_from_crew_output(result, crew)` | `Trace` |
-| `LlamaIndexInstrumentationHandler` | `with handler:` then `handler.build_trace(query=..., response=...)` | `Trace` |
-
-### Framework Capture Strategies
-
-Each framework exposes different hook points:
-
-#### LangChain
-
-- **Hook:** `BaseCallbackHandler` injected into `AgentExecutor.invoke(config={"callbacks": [handler]})`
-- **Parallel support:** No (`AgentExecutor` is sequential)
-- **Notes:** "Agents-as-tools" pattern requires tracking callback nesting depth. Tool calls containing LLM calls unfold into `agent_call` steps with sub-traces.
+A LangChain example:
 
 ```python
 from attest import LangChainAdapter
 
-adapter = LangChainAdapter(agent_id="my-agent")
+adapter = LangChainAdapter(agent_id="support")
 with adapter.capture() as handler:
-    my_agent_executor.invoke({"input": "Handle this issue"}, config={"callbacks": [handler]})
+    executor.invoke({"input": "Check my order"}, config={"callbacks": [handler]})
 trace = adapter.trace
 ```
 
-#### Google ADK
+Do not infer parallel execution, agent identity, or nested delegation merely from the framework's feature list. Inspect the trace for the required `agent_call`/`sub_trace` structure and temporal fields before using those assertions. Use manual instrumentation or another capture path when an adapter cannot expose the necessary evidence.
 
-- **Hook:** Runner event stream (`session.run()` yields events with agent boundaries)
-- **Parallel support:** Yes (`ParallelAgent`)
-- **Notes:** `SequentialAgent` produces ordered steps. `ParallelAgent` produces concurrent steps with overlapping temporal intervals. `sub_agents` map to trace tree nesting.
+## Manual and OpenTelemetry capture
 
-```python
-from attest import GoogleADKAdapter
-
-adapter = GoogleADKAdapter(agent_id="incident-agent")
-trace = await adapter.capture_async(
-    runner,
-    user_id="user-1",
-    session_id="session-1",
-    message="Analyze this incident",
-)
-```
-
-#### LlamaIndex
-
-- **Hook:** `AgentWorkflow` event listener for agent transitions
-- **Parallel support:** No (`AgentWorkflow` manages handoffs sequentially)
-- **Notes:** Workflow events provide agent transition boundaries. Each `FunctionAgent` within the workflow becomes a trace tree node.
-
-```python
-from attest import LlamaIndexInstrumentationHandler
-
-handler = LlamaIndexInstrumentationHandler(agent_id="my-workflow")
-with handler:  # attaches to the LlamaIndex instrumentation dispatcher
-    response = await my_workflow.run(user_msg="Handle this issue")
-trace = handler.build_trace(query="Handle this issue", response=str(response))
-```
-
-#### CrewAI
-
-- **Hook:** Task execution callbacks + agent step callbacks
-- **Parallel support:** Partial (concurrent tasks within a crew)
-- **Notes:** Crew maps to root trace. Each Agent becomes a sub-trace. Task delegation maps to `agent_call` steps.
-
-```python
-from attest import CrewAIAdapter
-
-adapter = CrewAIAdapter(agent_id="my-crew")
-with adapter.capture() as cap:
-    result = my_crew.kickoff()
-trace = cap.trace_from_crew_output(result, my_crew)
-```
-
-### Temporal Data Population
-
-Framework adapters populate temporal fields that provider adapters do not:
-
-| Field | Provider Adapter | Framework Adapter |
-|---|---|---|
-| `started_at_ms` | Wall-clock around LLM call | Framework event timestamp |
-| `ended_at_ms` | Wall-clock around LLM call | Framework event timestamp |
-| `agent_id` | Not populated | From framework agent metadata |
-| `agent_role` | Not populated | From framework agent description |
-
-These fields enable Layer 3 temporal assertions (`agent_ordered_before`, `agents_overlap`, `ordered_agents`) and trace tree analysis.
-
-## Special Adapters
-
-### Manual Adapter
-
-For custom agent implementations that do not use a supported framework. The developer manually records steps and builds the trace:
+Manual traces are useful for custom agents or isolated tests, without provider calls:
 
 ```python
 from attest import ManualAdapter
 
-adapter = ManualAdapter(agent_id="my-agent")
-builder = adapter.create_builder()
-
-builder.set_input(messages=[{"role": "user", "content": "Hello"}])
-builder.add_llm_call("completion", args={"model": "gpt-4.1"}, result={"completion": "Hi there"})
-builder.add_tool_call(name="search", args={"query": "weather"})
-builder.set_output(message="The weather is sunny.")
-
+builder = ManualAdapter(agent_id="support").create_builder()
+builder.set_input(query="Check order")
+builder.add_tool_call("lookup_order", args={"order_id": "O-1042"})
+builder.set_output(message="Order found")
 trace = builder.build()
 ```
 
-### OTel Adapter
+Python `OTelAdapter.from_spans(otel_spans)` accepts readable spans, while `from_otel_span_dicts()` accepts span dictionaries. They convert supported telemetry into traces; the existence of an OpenTelemetry integration does not guarantee that every observability vendor or attribute convention is supported.
 
-Converts OpenTelemetry spans into Attest traces. Use this to test agents instrumented with any OTel-compatible observability platform (Langfuse, Arize, etc.):
+## Released inventory and maturity
 
-```python
-from attest import OTelAdapter
+The 1.1.0 engine capability inventory lists **10 Python** and **7 TypeScript** adapters. Maturity describes compatibility commitments, not assertion cost:
 
-trace = OTelAdapter.from_spans(otel_spans)
-```
+- **Stable:** covered by parity and conformance suites; behavior changes are breaking changes.
+- **Beta:** shipped and tested, but interface or behavior can change in a minor release.
+- **Experimental:** no stability commitment; may change or be removed in any release.
 
-The OTel adapter maps:
-- Span `startTimeUnixNano` / `endTimeUnixNano` to `started_at_ms` / `ended_at_ms`
-- Span attributes `gen_ai.agent.name` to `agent_id`
-- Span name to step name
-
-## Implementing a Custom Adapter
-
-### Provider Adapter
-
-To add support for a new LLM provider, subclass `BaseProviderAdapter` and implement four methods:
-
-```python
-from attest.adapters._base import BaseProviderAdapter
-
-class MyProviderAdapter(BaseProviderAdapter):
-    def _extract_completion(self, response) -> str:
-        return response.text
-
-    def _extract_model(self, response, **metadata) -> str | None:
-        return response.model_id
-
-    def _extract_total_tokens(self, response) -> int | None:
-        return response.usage.total if response.usage else None
-
-    def _extract_tool_calls(self, response) -> list[dict]:
-        return [
-            {"name": tc.function.name, "args": tc.function.arguments}
-            for tc in (response.tool_calls or [])
-        ]
-```
-
-Then use it:
-
-```python
-adapter = MyProviderAdapter()
-trace = adapter.trace_from_response(response, input_messages=messages)
-```
-
-### Framework Adapter
-
-Framework adapters are more involved. The key steps:
-
-1. Subclass `BaseAdapter`
-2. Hook into the framework's event system (a context manager such as `capture()`, or an event handler)
-3. Collect events into a `TraceBuilder` from `self._create_builder()` during execution
-4. Return `builder.build()` from a method such as `build_trace()`
-
-The LangChain adapter serves as a reference implementation (~300 lines).
-
-## Adapter Inventory
-
-| Adapter | Tier | Captures | Install Extra |
+| Integration | Python | TypeScript | Maturity |
 |---|---|---|---|
-| `OpenAIAdapter` | Provider | LLM calls, tokens, tool use | `attest-ai[openai]` |
-| `AnthropicAdapter` | Provider | LLM calls, tokens, tool use | `attest-ai[anthropic]` |
-| `GeminiAdapter` | Provider | LLM calls, tokens, tool use | `attest-ai[gemini]` |
-| `OllamaAdapter` | Provider | LLM calls, tokens, tool use | `attest-ai[ollama]` |
-| `LangChainAdapter` | Framework | Tools, agents, delegation | `attest-ai[langchain]` |
-| `GoogleADKAdapter` | Framework | Tools, agents, parallel groups | `attest-ai[google-adk]` |
-| `CrewAIAdapter` | Framework | Tasks, agents, delegation | `attest-ai[crewai]` |
-| `LlamaIndexInstrumentationHandler` | Framework | Workflows, agent transitions | `attest-ai[llamaindex]` |
-| `ManualAdapter` | Special | Developer-defined steps | (included in base) |
-| `OTelAdapter` | Special | OTel spans | `attest-ai[otel]` |
+| OpenAI | `OpenAIAdapter` | OpenAI | Stable |
+| Anthropic | `AnthropicAdapter` | Anthropic | Stable |
+| Manual | `ManualAdapter` | Manual | Stable |
+| Gemini | `GeminiAdapter` | Gemini | Beta |
+| Ollama | `OllamaAdapter` | Ollama | Beta |
+| LangChain / LangChain.js | `LangChainAdapter` | LangChain.js | Beta |
+| OpenTelemetry | `OTelAdapter` | OpenTelemetry | Beta |
+| CrewAI | `CrewAIAdapter` | Not shipped | Beta |
+| Google ADK | `GoogleADKAdapter` | Not shipped | Experimental |
+| LlamaIndex | `LlamaIndexInstrumentationHandler` | Not shipped | Experimental |
+
+Install the Python extra for the chosen integration:
+
+```bash
+uv add "attest-ai[openai]>=1.1.0"
+```
+
+Other extras are `anthropic`, `gemini`, `ollama`, `langchain`, `crewai`, `google-adk`, `llamaindex`, and `otel`. Manual capture is included in the base package. See the [assertion pipeline](/architecture/assertion-pipeline/) for the evidence each kind of check needs.

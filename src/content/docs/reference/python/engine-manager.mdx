@@ -1,188 +1,125 @@
 ---
 title: "EngineManager"
-description: "Engine subprocess lifecycle management, binary discovery, and protocol communication."
+description: "Python engine discovery, subprocess lifecycle, and request handling in Attest 1.1.0."
 ---
 
-The `EngineManager` class manages the lifecycle of the `attest-engine` Go subprocess. It handles binary discovery, process spawning, JSON-RPC communication, and graceful shutdown.
-
-## Usage
+`EngineManager` starts and stops the engine subprocess that evaluates your checks. Pytest normally manages it for you; use it directly when building a custom integration. Use `AttestClient` for concurrent requests rather than adding another reader to the engine's stdout.
 
 ```python
+import asyncio
 from attest.engine_manager import EngineManager
 
-async with EngineManager() as engine:
-    result = await engine.send_request("evaluate_batch", params)
-```
 
-In practice, the pytest plugin manages the engine automatically via the `attest_engine` fixture. Direct usage of `EngineManager` is needed for custom integrations or the `ContinuousEvalRunner`.
+async def main():
+    async with EngineManager() as engine:
+        response = await engine.send_request("evaluate_batch", {
+            "trace": {"trace_id": "greeting", "output": {"message": "Hello"}, "steps": []},
+            "assertions": [{"assertion_id": "greeting-check", "type": "content",
+                "spec": {"target": "output.message", "check": "contains", "value": "hello"}}],
+        })
+        print(response["results"][0]["status"])
+
+
+asyncio.run(main())
+```
 
 ## Constructor
 
 ```python
-EngineManager(
-    engine_path: str | None = None,
-    log_level: str = "warn",
-)
+EngineManager(engine_path: str | None = None, log_level: str = "warn")
 ```
 
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `engine_path` | `str \| None` | `None` | Explicit path to the `attest-engine` binary. When `None`, uses the discovery chain. |
-| `log_level` | `str` | `"warn"` | Engine log verbosity: `debug`, `info`, `warn`, `error` |
+`engine_path` selects an explicit binary; otherwise discovery runs. `log_level` is passed to the engine (`debug`, `info`, `warn`, or `error`).
 
-## Binary Discovery Chain
+## Binary Discovery
 
-`resolve_engine()` finds the binary in this order. The first engine found must report exactly `ENGINE_VERSION`; a mismatch raises `EngineVersionMismatchError` and discovery does not fall through to the next location.
+`resolve_engine(explicit_path: str | None = None, *, allow_download: bool = True) -> str` returns the resolved path. The first binary found must report exactly `ENGINE_VERSION`, **1.1.0** for this SDK. A mismatch raises `EngineVersionMismatchError`; discovery does not skip it.
 
-| Priority | Source | Details |
-|----------|--------|---------|
-| 1 | `engine_path` argument | Raises `FileNotFoundError` if the file does not exist. |
-| 2 | `ATTEST_ENGINE_PATH` env var | Absolute path override. Raises `FileNotFoundError` if the file does not exist. |
-| 3 | `PATH` lookup | First executable `attest-engine` in a `PATH` directory |
-| 4 | `~/.attest/bin/<ENGINE_VERSION>/` | Version-specific cache populated by the auto-downloader |
-| 5 | Auto-download | Downloads from GitHub Releases with SHA256 verification |
-| 6 | Error | `FileNotFoundError` with actionable install instructions when download is disabled |
+| Priority | Source |
+|---|---|
+| 1 | Explicit path; a missing file raises `FileNotFoundError` |
+| 2 | `ATTEST_ENGINE_PATH`; a missing file raises `FileNotFoundError` |
+| 3 | Executable `attest-engine` on `PATH` (`attest-engine.exe` on Windows); empty `PATH` entries skipped |
+| 4 | Version-specific `~/.attest/bin/<ENGINE_VERSION>/` cache |
+| 5 | Automatic release download, unless disabled |
 
-:::tip
-Set `ATTEST_ENGINE_NO_DOWNLOAD=1` to disable auto-download (step 5). Useful in CI environments where you pre-install the binary.
-:::
+`ATTEST_ENGINE_NO_DOWNLOAD=1` (also `true` or `yes`) disables download. Neither a monorepo/local `bin/` directory nor the legacy unversioned cache is searched.
 
-### Auto-Download
+### Download Verification
 
-When no binary is found, the SDK downloads it from GitHub Releases:
+Published SDK packages carry `engine-checksums.json`. Downloads must match that **package-shipped** SHA256; the release's downloaded checksum file is not trusted. The binary is atomically installed into the version-specific cache. Downloads require HTTPS (including redirects), allow at most five redirects, and have a 10-second connect / 120-second total deadline. Source/editable installs without the checksum table cannot auto-download: build the engine and set `ATTEST_ENGINE_PATH`.
 
-1. Fetches `checksums-sha256.txt` for the target `ENGINE_VERSION`
-2. Downloads the platform-specific binary (`darwin-arm64`, `linux-amd64`, etc.)
-3. Verifies SHA256 checksum
-4. Atomic write to `~/.attest/bin/<ENGINE_VERSION>/attest-engine`
+Supported release assets:
 
-Supported platforms:
-
-| OS | Architecture | Asset Name |
-|----|-------------|------------|
-| macOS | ARM64 (Apple Silicon) | `attest-engine-darwin-arm64` |
-| macOS | x86_64 (Intel) | `attest-engine-darwin-amd64` |
+| OS | Architecture | Asset |
+|---|---|---|
+| macOS | ARM64 | `attest-engine-darwin-arm64` |
+| macOS | AMD64 | `attest-engine-darwin-amd64` |
 | Linux | ARM64 | `attest-engine-linux-arm64` |
-| Linux | x86_64 | `attest-engine-linux-amd64` |
-| Windows | AMD64 | `attest-engine-windows-amd64.exe` |
+| Linux | AMD64 | `attest-engine-linux-amd64` |
 | Windows | ARM64 | `attest-engine-windows-arm64.exe` |
+| Windows | AMD64 | `attest-engine-windows-amd64.exe` |
 
-## Lifecycle Methods
+## Lifecycle and Requests
 
-### `start() -> InitializeResult`
+All methods below are async unless described as a property or synchronous method.
 
-Spawns the engine subprocess and sends the `initialize` JSON-RPC request.
+| API | Behavior |
+|---|---|
+| `start(env_overrides: Mapping[str, str] \| None = None) -> InitializeResult` | Spawn, send `initialize`, check version/capabilities; overrides affect the child environment only. A failed initialization stops the process before propagating the error. |
+| `restart(env_overrides: Mapping[str, str] \| None = None) -> InitializeResult` | Kill the old process and start a fresh engine; used for timeout recovery |
+| `stop() -> None` | Release an attached client's stdout reader, request shutdown, and stop the process; kill if termination exceeds five seconds |
+| `send_request(method: str, params: dict[str, Any]) -> Any` | Send a request and return the result with the matching request ID |
+| `is_running: bool` | Property: subprocess is alive |
+| `spawn_env: Mapping[str, str]` | Property: environment used for the current engine; do not log it because it may contain credentials |
+| `attach_client(client: AttestClient) -> None` | Synchronous: associate the single client that owns stdout |
 
-```python
-engine = EngineManager()
-init_result = await engine.start()
+An async context manager calls `start()` on entry and `stop()` on exit. Calling a non-initialize request before startup raises `RuntimeError`. Once a client is attached, `send_request()` delegates to that client's correlated request loop; attaching a second different client raises `RuntimeError`.
 
-print(init_result.engine_version)           # "1.0.0"
-print(init_result.capabilities)             # ["layers_1_4", ...]
-print(init_result.max_concurrent_requests)  # 64
-print(init_result.max_trace_size_bytes)     # 10485760
-print(init_result.max_steps_per_trace)      # 10000
-```
-
-Raises `EngineVersionMismatchError` if the engine version differs from `ENGINE_VERSION`, and `RuntimeError` if the engine reports incompatible capabilities. A failure after the process starts stops it before the error propagates.
-
-### `stop()`
-
-Sends the `shutdown` JSON-RPC request, then terminates the process.
-
-```python
-await engine.stop()
-```
-
-If the shutdown request fails, the process is terminated. If termination times out after 5 seconds, the process is killed.
-
-### Async Context Manager
-
-The recommended pattern. `start()` is called on `__aenter__`, `stop()` on `__aexit__`.
-
-```python
-async with EngineManager(log_level="debug") as engine:
-    # Engine is initialized and ready
-    result = await engine.send_request("evaluate_batch", params)
-# Engine is stopped
-```
-
-### `send_request(method: str, params: dict) -> Any`
-
-Send a JSON-RPC 2.0 request and return the result.
-
-```python
-result = await engine.send_request("evaluate_batch", {
-    "trace": trace.to_dict(),
-    "assertions": [a.to_dict() for a in assertions],
-})
-```
-
-Raises `RuntimeError` if the engine has not been initialized (except for the `initialize` method itself).
-
-### `is_running: bool`
-
-Property that returns `True` if the subprocess is alive.
+Without an attached client, the manager uses the startup/shutdown handshake reader, which drops responses whose IDs do not match. Do not issue concurrent direct handshake requests. `AttestClient` supplies request correlation, timeout-triggered restart, and conservative model-budget accounting for normal operation.
 
 ## InitializeResult
 
-The response from the engine's `initialize` method:
+| Field | Type | Meaning in 1.1.0 |
+|---|---|---|
+| `engine_version` | `str` | `"1.1.0"` |
+| `protocol_version` | `int` | `1` |
+| `capabilities` | `list[str]` | Accepted features and configured-provider markers |
+| `missing` | `list[str]` | Requested but unavailable capabilities |
+| `compatible` | `bool` | Required capabilities are present |
+| `encoding` | `str` | `"json"` |
+| `max_concurrent_requests` | `int` | Advertised limit `1` |
+| `max_trace_size_bytes` | `int` | `10485760` (10 MiB) |
+| `max_steps_per_trace` | `int` | `10000` |
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `engine_version` | `str` | Engine binary version (e.g., `"1.0.0"`) |
-| `protocol_version` | `int` | Protocol version (currently `1`) |
-| `capabilities` | `list[str]` | Supported capability strings |
-| `missing` | `list[str]` | Requested capabilities not available |
-| `compatible` | `bool` | `True` if all required capabilities are present |
-| `encoding` | `str` | Wire encoding (`"json"`) |
-| `max_concurrent_requests` | `int` | Max parallel evaluations (default `64`) |
-| `max_trace_size_bytes` | `int` | Max trace payload (default 10 MB) |
-| `max_steps_per_trace` | `int` | Max steps per trace (default `10000`) |
+`embedding` / `llm_judge` capabilities mean the assertion types are accepted, not that providers are configured; inspect `embedding_configured` / `judge_configured`. Incompatible required capabilities raise `RuntimeError`. See [JSON-RPC Protocol](/reference/engine/json-rpc-protocol/) for wire details.
 
 ## Pytest Integration
 
-The engine lifecycle is handled by the `attest_engine` session-scoped fixture:
+The session-scoped `attest_engine` fixture handles engine lifecycle; the `attest` fixture provides `evaluate`, `inspect`, async variants, and `enforce`.
 
-```python
-# conftest.py — no manual setup needed
-# The attest pytest plugin auto-registers fixtures
+| Option | Default | Purpose |
+|---|---|---|
+| `--attest-engine PATH` | Discovery | Select binary |
+| `--attest-log-level LEVEL` | `warn` | Engine logging |
+| `--attest-tier N` | All | Select tests tagged at or below the tier |
+| `--attest-budget USD` | Unlimited | Cumulative session-cost limit |
+| `--attest-cost-report` | Off | Session cost summary |
+| `--attest-strict` | Off | Fail rather than skip not-evaluated tests (also `ATTEST_STRICT`) |
+| `--attest-report PATH` | Off | Report-v2 JSON, including every test outcome |
+| `--attest-diagnostics` | Off | Expanded assertion diagnostics |
+| `--attest-trials N` | `1` | Fixed-N trials for synchronous tests using `attest` |
+| `--attest-min-pass-rate RATE` | `1.0` | Minimum evaluated-trial pass rate |
+| `--attest-egress block` | `ATTEST_EGRESS`, else allow | Best-effort guard against provider connections from test code |
 
-def test_agent(attest):
-    result = my_agent(query="test")
-    chain = expect(result).output_contains("test")
-    attest.evaluate(chain)
-```
+## Environment and Versions
 
-The fixture accepts CLI options:
-
-| Option | Default | Description |
-|--------|---------|-------------|
-| `--attest-engine` | auto-discover | Path to engine binary |
-| `--attest-log-level` | `warn` | Engine log level |
-| `--attest-tier` | all | Only run tests up to this tier |
-| `--attest-budget` | unlimited | Abort if cumulative cost exceeds USD amount |
-| `--attest-cost-report` | off | Print cost summary at session end |
-| `--attest-strict` | off | Fail (instead of skip) tests with assertions that were not evaluated |
-| `--attest-report` | off | Write a report-v2 JSON file with every test outcome |
-| `--attest-diagnostics` | off | Render the diagnostic block for every Attest failure in the terminal summary |
-
-## Environment Variables
-
-| Variable | Description |
-|----------|-------------|
-| `ATTEST_ENGINE_PATH` | Override binary location (takes highest priority) |
-| `ATTEST_ENGINE_NO_DOWNLOAD` | Set to `1` to disable auto-download |
-| `ATTEST_ENGINE_TIMEOUT` | Engine response timeout in seconds (default `30`) |
-| `ATTEST_SIMULATION` | Set to `1` for simulation mode: layers 1-4 and 7 evaluate, layers 5-6 report `not_evaluated(simulation)` |
-
-## SDK and Engine Versions
-
-Each SDK release requires the engine version named by `ENGINE_VERSION`, equal to the SDK's own version. The auto-downloader uses `ENGINE_VERSION` to construct the GitHub release URL and cache directory. A manually supplied engine must report that exact version.
+`ATTEST_ENGINE_TIMEOUT` is the SDK response timeout in seconds (default `30`). On an ordinary client timeout the engine restarts and pending requests fail. `ATTEST_SIMULATION=1` still starts the engine and evaluates deterministic assertions, including trace trees and effects; Layers 5–6 return `not_evaluated: simulation`. It does not prevent the agent itself from calling providers.
 
 ```python
 from attest import __version__, ENGINE_VERSION
 
-print(__version__)      # "1.1.0"
-print(ENGINE_VERSION)   # "1.1.0"
+assert __version__ == ENGINE_VERSION == "1.1.0"
 ```
+
+See [Configuration](/reference/configuration/) for all provider, budget, cache and egress settings.
