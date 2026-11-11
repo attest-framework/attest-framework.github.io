@@ -1,85 +1,22 @@
 ---
 title: "Drift Detection"
-description: "How Attest measures a score against the assertion's own history: the dynamic pass bar, the cold start, query_drift, and alerts."
+description: "Compare a check's newest score with its own previous scores."
 ---
 
-Drift detection compares an assertion's newest score with the engine's history of that same assertion. It surfaces in three places: the `"dynamic"` threshold on judge and similarity assertions, the `query_drift` engine method, and the alerts of the [continuous evaluation](/guides/continuous-eval/) runner.
+Drift detection asks whether a check's score has fallen relative to its recent history. It can reveal a change in a model, inputs or tools; it does not identify the cause or establish that an agent is correct. Continuous evaluation and drift detection are **experimental**.
 
-## What is drift?
+## How the baseline works
 
-Agent drift occurs when an AI agent's behavior changes without code changes. Common causes:
+The engine uses the most recent 50 passing or soft-failing scores for the same assertion id, before the result being judged. With fewer than ten eligible scores it uses the static threshold alone. Hard failures and `not_evaluated` results never lower the baseline.
 
-- **Model updates**: the provider deploys a new model version
-- **Data drift**: the input distribution shifts over time
-- **Tool changes**: external APIs change behavior or rate limits
-- **Prompt sensitivity**: subtle changes in system prompts cascade
-- **Context degradation**: RAG retrieval quality degrades as data grows stale
-
-## The estimator
-
-The engine keeps one history row per evaluation under the assertion id. The baseline is the newest 50 rows that passed or soft-failed, taken before the row being judged. Hard failures never enter the baseline, so a run of failures cannot lower the bar.
-
-With at least 10 baseline rows, a score is below the bar when
+For a judge or similarity assertion, `threshold="dynamic"` uses a pass bar of:
 
 ```text
-score < max(static_threshold, mean − 2·max(σ, 0.02))
+max(0.8, mean − 2·max(σ, 0.02))
 ```
 
-`static_threshold` is the assertion's own numeric threshold, or `0.8` when it has none (a missing threshold, or one at or below 0, is `0.8`). The floor means a dynamic assertion is never easier than the default static one, and the σ floor of 0.02 keeps a history of identical scores from failing on noise. The window of 50, the factor 2 and both floors are fixed; nothing configures them.
+The history window and constants are fixed. The direct `query_drift` method uses its supplied static threshold (default `0.8`) as the floor instead. These are related mechanisms, not configurable window estimators.
 
-| History (newest score last) | Score | Result |
-|---|---|---|
-| ten runs at 0.9 | 0.5 | below the bar (`hard_fail` with `drift`) |
-| ten runs at 1.0 | 0.99 | above the bar (0.96) |
-| ten runs at 0.0 | 0.0 | the zeros are not in the baseline; 0.0 is below the static 0.8 |
-| fewer than 10 passing or soft rows | any | static threshold alone, no drift |
+History is stored under `ATTEST_CACHE_DIR`. An empty cache starts cold; stable ids and preserved history matter. Upgrading from 1.0.x to 1.1.0 changes ids and rebuilds this history.
 
-### Cold start
-
-A baseline is active only with at least 10 passing or soft-failing runs. Before that, `query_drift` reports `ok` and no drift is flagged; a hard failure is judged by the static threshold alone. Evaluations that are `not_evaluated`, including simulation runs, are not recorded and never move a baseline.
-
-History lives under `ATTEST_CACHE_DIR`. A CI job that starts with an empty cache starts cold, so `"dynamic"` behaves as the static `0.8` until ten eligible results exist. Those can accumulate within the same job, and the baseline activates once they do. Restoring the directory between runs only avoids rebuilding the history.
-
-## Dynamic thresholds
-
-`output_similar_to` (Layer 5) and `passes_judge` (Layer 6) accept `threshold="dynamic"` (`"dynamic"` in TypeScript options too). The score is judged against the bar above instead of a fixed value. A score below the bar is a `hard_fail` (a `soft_fail` when the assertion is `soft`), even when the score is above 0.8. The result carries `threshold_source: "dynamic"` and, on a hard failure below the bar, a `drift` object with `assertion_id`, `mean`, `stddev`, `count` of baseline rows, `latest_score`, `deviation` and `status: "drift_detected"`.
-
-```python
-expect(result).passes_judge("is polite", threshold="dynamic")
-expect(result).output_similar_to("reference", threshold="dynamic")
-```
-
-If the engine has no history store, or reading it fails, the assertion is judged by the static threshold and `threshold_source` is `dynamic_unavailable`.
-
-## Querying drift directly
-
-The `query_drift` method reports whether the newest recorded run of an assertion departs from its baseline. It is read-only and never writes history. It takes an optional `static_threshold` (default `0.8`); the window is fixed at 50 and `window_size` is accepted and ignored. Its report status is `drift_detected` or `ok`. See the [JSON-RPC protocol reference](/reference/engine/json-rpc-protocol/).
-
-## Alerts
-
-To get an alert instead of a test failure, run the assertions on live traces with `ContinuousEvalRunner`. It reads drift for every evaluated assertion and posts to a webhook or Slack when an assertion is `drift_detected` or `hard_fail`. Alert payloads, error handling, `stop()` draining, and the assertion id scheme are in [Continuous evaluation](/guides/continuous-eval/).
-
-Deterministic assertions (layers 1-4) score 0 or 1, so their baseline is a flat 1.0 and a failure is a hard failure on any history. Drift is most informative on layer 5 and 6 scores, which vary run to run.
-
-### Sample rate guidelines
-
-| Environment | Rate | Rationale |
-|-------------|------|-----------|
-| Development | `1.0` | Evaluate every trace |
-| Staging | `0.5` | Half of traces, catch regressions |
-| Production (layers 1-4 only) | `0.1`-`0.5` | Free assertions, higher coverage |
-| Production (with layers 5-6) | `0.01`-`0.05` | Paid assertions, minimize cost |
-
-A low sample rate lengthens the cold start: the baseline needs 10 evaluated runs, not 10 requests.
-
-## Relationship to testing
-
-| Concern | Test-time (`pytest`) | Production (continuous eval) |
-|---------|---------------------|-------------------|
-| When | CI/CD pipeline | Live traffic |
-| Coverage | Synthetic test cases | Real user inputs |
-| Cost | Per test run | Per sampled request |
-| Assertions | All layers | Layers 1-4 preferred |
-| Failure mode | Test failure | Alert notification |
-
-Use tests for comprehensive assertion coverage with synthetic inputs. Use continuous evaluation for lightweight monitoring with real production traffic.
+See [dynamic thresholds in the SDK judge guide](/sdk-guides/judges/#dynamic-thresholds) for evaluated examples and fallback behavior, and the [SDK continuous-evaluation guide](/sdk-guides/continuous-eval/) for drift alerts. Alerting skips unevaluated rows, so missing measurements need separate monitoring.

@@ -13,22 +13,22 @@ import testAgentPy from "../../../examples/quickstart/test_agent.py?raw";
 Install the `attest-ai` package and pytest:
 
 ```bash
-uv add "attest-ai>=1.0.0" pytest
+uv add "attest-ai>=1.1.0" pytest
 ```
 
 For framework-specific adapters, install extras:
 
 ```bash
-uv add "attest-ai[openai]>=1.0.0"       # OpenAI adapter
-uv add "attest-ai[langchain]>=1.0.0"    # LangChain support
-uv add "attest-ai[llamaindex]>=1.0.0"   # LlamaIndex support
-uv add "attest-ai[google-adk]>=1.0.0"   # Google ADK support
-uv add "attest-ai[otel]>=1.0.0"         # OpenTelemetry support
+uv add "attest-ai[openai]>=1.1.0"       # OpenAI adapter (stable)
+uv add "attest-ai[langchain]>=1.1.0"    # LangChain support (beta)
+uv add "attest-ai[llamaindex]>=1.1.0"   # LlamaIndex support (experimental)
+uv add "attest-ai[google-adk]>=1.1.0"   # Google ADK support (experimental)
+uv add "attest-ai[otel]>=1.1.0"         # OpenTelemetry support (beta)
 ```
 
 ## Create an Agent
 
-The `@agent` decorator records each LLM and tool call on a `TraceBuilder` and returns an `AgentResult`. This is the [`quickstart`](https://github.com/attest-framework/attest-examples/tree/main/quickstart) example from attest-examples:
+The `@agent` decorator supplies a `TraceBuilder` and returns an `AgentResult`. Your code or adapter must record the LLM and tool calls; the decorator does not intercept arbitrary calls automatically. This is the [`quickstart`](https://github.com/attest-framework/attest-examples/tree/main/quickstart) example from attest-examples:
 
 <Code code={agentPy} lang="python" title="quickstart/agent.py" />
 
@@ -81,7 +81,7 @@ def test_explains_recursion(attest):
 
 ## Simulation Mode
 
-Run tests without provider calls: deterministic layers still evaluate, and embedding and judge assertions report `not_evaluated(simulation)`:
+Simulation makes embedding and judge assertions report `not_evaluated(simulation)` while deterministic layers still evaluate. It does not stop provider calls in your own application; use mocks or [strict replay](/sdk-guides/replay/) for those:
 
 ```bash
 ATTEST_SIMULATION=1 uv run pytest -v
@@ -94,7 +94,7 @@ ATTEST_SIMULATION=1 uv run pytest -v
 | `OPENAI_API_KEY` | OpenAI API key for judge/embedding assertions |
 | `ANTHROPIC_API_KEY` | Anthropic API key for judge assertions |
 | `ATTEST_ENGINE_PATH` | Override engine binary location |
-| `ATTEST_SIMULATION` | Enable simulation mode (no real LLM calls) |
+| `ATTEST_SIMULATION` | Skip embedding and judge provider calls; application calls still need mocks |
 | `ATTEST_JUDGE_PROVIDER` | LLM judge provider: `openai`, `anthropic`, `gemini`, `acp` |
 | `ATTEST_JUDGE_MODEL` | Model for judge assertions (e.g., `gpt-4.1`) |
 

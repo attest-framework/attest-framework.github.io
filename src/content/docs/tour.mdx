@@ -3,7 +3,9 @@ title: "Tour: from incident to regression test"
 description: The INC-1042 walk-through — capture a synthetic incident, replay the agent's real code against recorded model responses, and apply a merge policy to the results.
 ---
 
-`attest capture` records a run or incident as a fixture and checks that its drafted contracts are consistent with the recording. This does not establish that the recorded behavior is correct; choose independent invariants for that. Strict replay runs your agent's real code against the recorded model responses with zero live model calls for matching requests. Checks report **pass**, **fail**, or **not evaluated** with a reason; a policy determines which results block. Python and TypeScript support this workflow.
+Attest tests what an AI agent says, which tools it calls and what it changes. This tour uses Attest 1.1.0 to turn a synthetic double refund into a regression check: record the incident, replay the real agent code with recorded model responses, then apply a CI policy.
+
+Capture checks that drafted contracts are consistent with the recording, not that the behavior is correct. Choose independent business invariants. Strict replay makes zero live model calls for matching requests; checks report **pass**, **fail**, or **not evaluated**, and the policy decides which results block.
 
 The walk-through below follows one story from [refund-desk](https://github.com/attest-framework/refund-desk), a synthetic demo: a support agent refunds a customer twice after a payment timeout (INC-1042). It uses a scripted model server rather than a paid model API. The commands and outputs illustrate the demo; consult its README for the current released-channel pin and executable walkthrough. The commands below use `uv run attest` for Python and `npx attest` for TypeScript.
 
@@ -49,7 +51,7 @@ attestExpect(trace).toolCardinality("issue_refund", { per: "order_id", atMost: 1
 
 ### 3. Capture it
 
-`attest capture` runs the agent once, records its trace and every model call, removes secrets, drafts contracts from the run and checks them against it. Guide: [capture](/sdk-guides/capture/).
+`attest capture` runs the agent once, records its trace and model calls, applies redaction, drafts contracts and checks them against the recording. Review the recorded command and inspect the fixture for sensitive data before sharing it; redaction is not a guarantee that every secret is removed. Guide: [capture](/sdk-guides/capture/).
 
 ```bash
 uv run attest capture --name inc-1042 --expect-fail -- make incident
@@ -88,7 +90,7 @@ Guides: [replay](/sdk-guides/replay/) and [world fixtures](/sdk-guides/world-fix
 [PR #11](https://github.com/attest-framework/refund-desk/pull/11) sends an `Idempotency-Key` and checks the refund status after a timeout. Because the fixed agent's tool results change its model requests, the PR also re-records the fixture from the fixed agent (`make capture`); replaying the fixed agent against the original incident fixture would be a strict replay miss. The replay test now passes, and the run summary shows what it cost:
 
 ```bash
-pytest tests/replay --attest-replay=strict --attest-egress=block
+uv run pytest tests/replay --attest-replay=strict --attest-egress=block
 ```
 
 ```text
@@ -105,6 +107,7 @@ A pull request that reverts the fix turns the same tests red. [PR #12](https://g
 | 0 | Every rule passed |
 | 1 | A rule with severity `block` was violated |
 | 2 | Only rules with severity `warn` were violated |
+| 3 | Invalid policy, report or incompatible baseline input |
 
 ### 7. An outage warns, it does not pass or fail
 
