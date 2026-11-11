@@ -3,14 +3,14 @@ title: "Behavior contracts"
 editUrl: "https://github.com/attest-framework/attest/edit/main/docs/guides/behavior-contracts.md"
 ---
 
-<!-- Synced from attest-framework/attest docs/guides/behavior-contracts.md at v1.1.0 (101de1cdd703b04abf5fd854f347565fd37715b8) by scripts/sync-release.mjs. Edit the source in attest, not this file. -->
+<!-- Synced from attest-framework/attest docs/guides/behavior-contracts.md at v1.1.1 (90bb5edfb10a31afe3bd8000217dc594ace746be) by scripts/sync-release.mjs. Edit the source in attest, not this file. -->
 
 A behavior contract states what the agent did, not what it said: how often a tool ran per business key, which tools it must never call, the shape and order of its tool calls, whether it looped, how many tool failures it hit in a row, and what arguments it passed. Contracts are Layer 3 trace checks. They run in the engine, deterministically, with no model calls, so they cost nothing and give the same answer on every run.
 
 
 ```bash
-uv add "attest-ai>=1.0.1"
-npm install -D "@attest-ai/core@>=1.0.1" "@attest-ai/vitest@>=1.0.1" "vitest@^4"
+uv add "attest-ai>=1.1.0"
+npm install -D "@attest-ai/core@>=1.1.0" "@attest-ai/vitest@>=1.1.0" "vitest@^4"
 ```
 
 ## Example: one refund per order
@@ -64,6 +64,8 @@ it("INC-1042 refunds twice", async () => {
 ```
 
 `inspect()` returns the results without failing the test, which is how a reproduction test asserts that a contract reports a known violation. Use `evaluate()` (Python `attest.evaluate(...)`, Vitest `evaluate(...)`) when the contract should fail the test.
+
+Since 1.1.0, building a chain without evaluating or inspecting it fails the test, including chains built in pytest fixtures and isolated Vitest concurrent test bodies. Adding an assertion after evaluation makes the chain unevaluated again: evaluate the complete chain after its final change. For concurrent lifecycle-hook limits on older Vitest versions, see [verdicts](/sdk-guides/verdicts/).
 
 ## Contracts
 

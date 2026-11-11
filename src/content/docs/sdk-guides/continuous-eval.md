@@ -3,9 +3,11 @@ title: "Continuous eval and drift alerts"
 editUrl: "https://github.com/attest-framework/attest/edit/main/docs/guides/continuous-eval.md"
 ---
 
-<!-- Synced from attest-framework/attest docs/guides/continuous-eval.md at v1.1.0 (101de1cdd703b04abf5fd854f347565fd37715b8) by scripts/sync-release.mjs. Edit the source in attest, not this file. -->
+<!-- Synced from attest-framework/attest docs/guides/continuous-eval.md at v1.1.1 (90bb5edfb10a31afe3bd8000217dc594ace746be) by scripts/sync-release.mjs. Edit the source in attest, not this file. -->
 
 `ContinuousEvalRunner` evaluates live traces against a fixed set of assertions in the background and posts an alert to a webhook or Slack when an assertion hard-fails or its score drops below its own history. The runner is in `attest-ai` (Python) and `@attest-ai/core` (TypeScript). Both send the same alert.
+
+**Status in 1.1.0: experimental.** Drift alerts are implemented in both SDKs, including alerts for a passing score that falls below its history. This feature has no stability commitment and can change or be removed in any release; do not use it as your only production monitor.
 
 Drift is measured against the engine's history of that assertion, so the assertions must be stable: the history is keyed by the assertion id, and the id comes from the runner `name` (see [Name and ids](#name-and-ids)).
 
@@ -183,4 +185,4 @@ The assertion ids derive from the runner `name`, the assertion type, its canonic
 
 ## Upgrading
 
-History is keyed by these ids. Rows written by earlier versions used ordinal ids and are not matched, so after upgrading to 1.1 each assertion rebuilds its baseline: the first 10 passing or soft-failing runs are the [cold start](#cold-start). The old rows stay in the history database; pruning, when enabled, removes them with the rest of the old history ([configuration](/sdk-guides/configuration/#cache-and-history)).
+History is keyed by these ids. Rows written by versions before 1.1.0 used ordinal ids and are not matched, so after upgrading to 1.1.0 each assertion rebuilds its baseline: the first 10 passing or soft-failing runs are the [cold start](#cold-start). The old rows stay in the history database; pruning, when enabled, removes them with the rest of the old history ([configuration](/sdk-guides/configuration/#cache-and-history)).

@@ -3,7 +3,7 @@ title: "Policies"
 editUrl: "https://github.com/attest-framework/attest/edit/main/docs/guides/policies.md"
 ---
 
-<!-- Synced from attest-framework/attest docs/guides/policies.md at v1.1.0 (101de1cdd703b04abf5fd854f347565fd37715b8) by scripts/sync-release.mjs. Edit the source in attest, not this file. -->
+<!-- Synced from attest-framework/attest docs/guides/policies.md at v1.1.1 (90bb5edfb10a31afe3bd8000217dc594ace746be) by scripts/sync-release.mjs. Edit the source in attest, not this file. -->
 
 A policy is the file that decides whether a report lets a pull request merge. `attest policy evaluate` reads a report-v2 and a policy, prints the violations as JSON, and exits with the verdict:
 
@@ -17,6 +17,7 @@ uv run attest policy evaluate --policy attest.policy.yaml --report attest-report
 | 0 | Every rule passed |
 | 1 | A rule with severity `block` was violated |
 | 2 | Only rules with severity `warn` were violated |
+| 3 | Usage error, invalid input, or a required input could not be loaded |
 
 A policy or report that cannot be read or is invalid exits 3 with the error on stderr; leaving out `--policy` or `--report` also exits 3. Exit 3 is neither a warning (2) nor a block (1), and CI steps that treat only 0, 1 and 2 as verdicts fail on it.
 
@@ -38,7 +39,7 @@ tests_failed: block
 # Fail the gate when the report's total cost exceeds this many dollars.
 max_cost_usd: 0.50
 
-# Per-layer caps on failures (keys 1–6, and 8 for plugin assertions; 0 means any layer).
+# Per-layer failure caps; 0 applies across all six layers and plugins.
 layers:
   3: { max_hard_fails: 0 }
   6: { max_soft_fails: 2, severity: warn }
