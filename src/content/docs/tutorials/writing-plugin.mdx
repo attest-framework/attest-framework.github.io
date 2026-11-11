@@ -1,305 +1,200 @@
 ---
 title: "Writing a Plugin"
-description: "Create custom evaluation logic for Attest plugin assertions."
+description: "Create, register, and evaluate custom assertions in Python and TypeScript."
 ---
 
-Plugin assertions add custom evaluation logic. Plugins run outside the engine and submit results through the `submit_plugin_result` method. This tutorial walks through creating, registering, and testing a custom plugin.
+A plugin checks a trace using your own rules. Use one when the built-in assertions do not cover a domain-specific requirement. The SDK runs registered assertion plugins and submits their results **before** asking the engine to evaluate the batch; you do not need to manage JSON-RPC requests or assertion IDs.
 
-## How Plugins Work
+## Python: Create a Plugin
 
-```
-┌─────────┐    evaluate_batch    ┌──────────┐
-│   SDK   │ ──────────────────► │  Engine   │
-└─────────┘                    └─────┬────┘
-     ▲                               │
-     │      submit_plugin_result     │ plugin assertion
-     │ ◄─────────────────────────────┘ delegated to plugin
-     │
-┌────┴──────┐
-│  Plugin   │  (your code)
-│  Process  │
-└───────────┘
+In an existing uv project, install Attest and pytest:
+
+```bash
+uv add "attest-ai>=1.1.0" pytest
 ```
 
-1. The engine receives an `evaluate_batch` request containing assertions of type `plugin`
-2. For plugin-type assertions, the engine waits for external results
-3. Your plugin code evaluates the trace and submits results via `submit_plugin_result`
-4. The engine incorporates the plugin result into the batch response
-
-## Step 1: Define the Plugin Logic
-
-Create a module that evaluates a trace and returns a score:
+Create `word_limit.py`:
 
 ```python
-# plugins/toxicity_checker.py
-from __future__ import annotations
+from typing import Any
 
-from attest._proto.types import Trace
+from attest import Trace
+from attest.plugins import PluginResult
 
 
-def check_toxicity(trace: Trace) -> tuple[str, float, str]:
-    """Evaluate trace output for toxic content.
+class WordLimitPlugin:
+    name = "word-limit"
+    plugin_type = "assertion"
 
-    Returns:
-        Tuple of (status, score, explanation).
-    """
-    output_message = trace.output.get("message", "")
-
-    toxic_patterns = [
-        "offensive term",
-        "harmful content",
-        "inappropriate language",
-    ]
-
-    found = [p for p in toxic_patterns if p.lower() in output_message.lower()]
-
-    if found:
-        score = max(0.0, 1.0 - (len(found) * 0.3))
-        return (
-            "hard_fail" if score < 0.5 else "soft_fail",
-            score,
-            f"Found {len(found)} toxic patterns: {', '.join(found)}",
+    def execute(self, trace: Trace, spec: dict[str, Any]) -> PluginResult:
+        limit = int(spec.get("config", {}).get("max_words", 50))
+        message = trace.output.get("message", "")
+        if not isinstance(message, str):
+            return PluginResult("hard_fail", 0.0, "output.message must be a string")
+        count = len(message.split())
+        passed = count <= limit
+        return PluginResult(
+            status="pass" if passed else "hard_fail",
+            score=1.0 if passed else 0.0,
+            explanation=f"{count} words; limit is {limit}",
         )
 
-    return ("pass", 1.0, "No toxic content detected")
+
+plugin = WordLimitPlugin()
 ```
 
-## Step 2: Submit Results via the Client
+Python plugins use a synchronous `execute(trace, spec)` method. The SDK runs it in a worker thread with a 30-second timeout. `spec` is the whole assertion specification: configuration passed to `.plugin()` is nested under `spec["config"]`.
 
-Use `AttestClient.submit_plugin_result` to send results to the engine:
+`PluginResult` requires `status`, `score`, and `explanation`; it also accepts optional `metadata`. Metadata is available on the returned plugin result, but the execution helper submits only status, score, and explanation to the engine. Scores do not automatically select a status: choose the status explicitly.
 
-```python
-# plugins/runner.py
-from __future__ import annotations
+## Register and Evaluate in pytest
 
-from attest._proto.types import Trace
-from attest.client import AttestClient
-
-from plugins.toxicity_checker import check_toxicity
-
-
-async def run_toxicity_plugin(
-    client: AttestClient,
-    trace: Trace,
-    assertion_id: str,
-) -> bool:
-    """Run toxicity check and submit result to engine."""
-    status, score, explanation = check_toxicity(trace)
-
-    accepted = await client.submit_plugin_result(
-        trace_id=trace.trace_id,
-        plugin_name="toxicity-checker",
-        assertion_id=assertion_id,
-        status=status,
-        score=score,
-        explanation=explanation,
-    )
-    return accepted
-```
-
-### `submit_plugin_result` Parameters
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `trace_id` | `str` | ID of the trace being evaluated |
-| `plugin_name` | `str` | Plugin identifier |
-| `assertion_id` | `str` | ID of the assertion this result satisfies |
-| `status` | `str` | `"pass"`, `"soft_fail"`, or `"hard_fail"` |
-| `score` | `float` | Confidence score (0.0 to 1.0) |
-| `explanation` | `str` | Human-readable explanation |
-
-Returns `True` if the engine accepted the result.
-
-## Step 3: Wire into Tests
-
-Use the plugin in your pytest tests:
+Create `test_word_limit.py`:
 
 ```python
-# test_agent.py
-import pytest
-from attest import agent, expect, Assertion
+from attest import TraceBuilder, expect
 
-from plugins.runner import run_toxicity_plugin
+from word_limit import plugin
 
 
-@agent("chat-agent")
-def chat_agent(builder, user_message):
-    builder.add_llm_call(
-        name="gpt-4.1",
-        args={"messages": [{"role": "user", "content": user_message}]},
-        result={"content": "Here's a helpful response."},
-    )
-    return {"message": "Here's a helpful response."}
-
-
-def test_agent_not_toxic(attest):
-    result = chat_agent(user_message="Tell me about quantum computing")
-
-    # Standard assertions (layers 1-4)
-    chain = expect(result).output_contains("helpful")
-    agent_result = attest.evaluate(chain)
-    assert agent_result.passed
-
-    # Plugin assertion (plugin) — run separately
-    # In a full integration, this would be triggered by the engine
-    # when it encounters a plugin-type assertion
-```
-
-## Step 4: Plugin with ContinuousEvalRunner
-
-For production use, combine plugins with continuous evaluation:
-
-```python
-from attest import Assertion, ContinuousEvalRunner
-from attest.client import AttestClient
-from attest.engine_manager import EngineManager
-
-from plugins.toxicity_checker import check_toxicity
-
-
-async def setup_with_plugin():
-    engine = EngineManager()
-    await engine.start()
-    client = AttestClient(engine)
-
-    # Standard assertions evaluated by the engine
-    assertions = [
-        Assertion(
-            assertion_id="content_check",
-            type="content",
-            spec={"target": "output.message", "check": "forbidden", "values": ["error"]},
-        ),
-    ]
-
-    runner = ContinuousEvalRunner(
-        client=client,
-        assertions=assertions,
-        sample_rate=0.1,
-    )
-    await runner.start()
-
-    return runner, client, engine
-
-
-async def evaluate_with_plugin(runner, client, trace):
-    """Evaluate trace with both engine assertions and custom plugin."""
-    # Engine handles layers 1-6
-    await runner.submit(trace)
-
-    # Plugin handles plugin assertions — run independently
-    status, score, explanation = check_toxicity(trace)
-    if status != "pass":
-        # Dispatch alert manually or submit to engine
-        await client.submit_plugin_result(
-            trace_id=trace.trace_id,
-            plugin_name="toxicity-checker",
-            assertion_id="plugin_toxicity",
-            status=status,
-            score=score,
-            explanation=explanation,
+def test_short_answer(attest):
+    attest.plugin_registry.register(plugin.name, plugin)
+    trace = TraceBuilder().set_output(message="Refund processed.").build()
+    result = attest.evaluate(
+        expect(trace).output_contains("Refund").plugin(
+            "word-limit", {"max_words": 10}
         )
+    )
+    assert result.passed
 ```
 
-## Plugin Design Guidelines
+Run it without a provider or paid model call:
 
-### Stateless Evaluation
+```bash
+uv run pytest test_word_limit.py
+```
 
-Plugins receive a `Trace` and return a result. Keep evaluation functions stateless:
+`expect()` accepts a `Trace` or an `AgentResult(trace=trace)`. The fixture assigns assertion IDs, looks up the plugin under type `"assertion"`, executes it, submits the result, and evaluates the chain. Register the instance, not the class. Using the same registry key and `plugin.name` works in both SDKs.
+
+To test the plugin logic without the engine, call it directly:
 
 ```python
-# Stateless — receives all data it needs
-def evaluate(trace: Trace) -> tuple[str, float, str]:
-    ...
+def test_word_limit_logic():
+    trace = TraceBuilder().set_output(message="one two three").build()
+    result = plugin.execute(trace, {"config": {"max_words": 2}})
+    assert result.status == "hard_fail"
 ```
 
-### Scoring
+Add this function to the same test module.
 
-| Score | Meaning |
-|-------|---------|
-| `1.0` | Full pass |
-| `0.8`-`0.99` | Minor concerns, pass threshold |
-| `0.5`-`0.79` | Moderate issues, soft fail |
-| `0.0`-`0.49` | Serious issues, hard fail |
+## Discover an Installed Python Plugin
 
-### Status Mapping
+For a reusable distribution, export the instance from an importable module and declare an entry point in that distribution's `pyproject.toml`:
 
-| Status | When to Use |
-|--------|-------------|
-| `pass` | Evaluation criteria fully met |
-| `soft_fail` | Criteria partially met; logged but does not fail tests |
-| `hard_fail` | Criteria not met; fails the test |
-
-### Error Handling
-
-Plugin errors should not crash the evaluation pipeline. Catch exceptions and return a `hard_fail` with an explanatory message:
-
-```python
-def safe_evaluate(trace: Trace) -> tuple[str, float, str]:
-    try:
-        return evaluate(trace)
-    except Exception as exc:
-        return ("hard_fail", 0.0, f"Plugin error: {exc}")
+```toml
+[project.entry-points."attest.plugins"]
+word-limit = "word_limit:plugin"
 ```
 
-## Example: Custom Metrics Plugin
+Ensure your package build includes `word_limit.py`. Install the distribution into the test environment, for example with `uv add ../word-limit-plugin`. The pytest fixture automatically loads the `attest.plugins` group at construction, so the test no longer needs the explicit registration line. The entry-point name becomes the registry key; it should match the ID used by `.plugin()`.
 
-A plugin that checks response length and readability:
+For a standalone registry, `load_entrypoint_plugins(registry)` and `register_plugin(registry, name, plugin)` are available from `attest.plugins`. A standalone registry is not automatically the pytest fixture's registry.
 
-```python
-from __future__ import annotations
+## TypeScript: Create and Register a Plugin
 
-from attest._proto.types import Trace
+In an existing npm project:
 
-
-def check_response_quality(trace: Trace) -> tuple[str, float, str]:
-    """Check response length and basic quality metrics."""
-    message = trace.output.get("message", "")
-
-    if not message:
-        return ("hard_fail", 0.0, "Empty response")
-
-    word_count = len(message.split())
-
-    # Too short
-    if word_count < 10:
-        return ("soft_fail", 0.4, f"Response too short: {word_count} words")
-
-    # Too long
-    if word_count > 500:
-        return ("soft_fail", 0.6, f"Response too long: {word_count} words")
-
-    # Check for repetition (simple heuristic)
-    sentences = message.split(".")
-    unique_sentences = set(s.strip().lower() for s in sentences if s.strip())
-    if len(sentences) > 3 and len(unique_sentences) < len(sentences) * 0.5:
-        return ("soft_fail", 0.5, "Response contains significant repetition")
-
-    return ("pass", 1.0, f"Response quality acceptable ({word_count} words)")
+```bash
+npm install -D "@attest-ai/core@>=1.1.0" "@attest-ai/vitest@>=1.1.0" "vitest@^4"
 ```
 
-## JSON-RPC Protocol
+Create `word-limit.ts`:
 
-Under the hood, `submit_plugin_result` sends this JSON-RPC request:
+```typescript
+import type { AttestPlugin } from "@attest-ai/core";
+
+export const wordLimit: AttestPlugin = {
+  name: "word-limit",
+  pluginType: "assertion",
+  execute(trace, spec) {
+    const config = spec["config"] as { maxWords?: number } | undefined;
+    const limit = config?.maxWords ?? 50;
+    const message = trace.output["message"];
+    if (typeof message !== "string") {
+      return { status: "hard_fail", score: 0, explanation: "output.message must be a string" };
+    }
+    const count = message.trim() === "" ? 0 : message.trim().split(/\s+/).length;
+    const passed = count <= limit;
+    return {
+      status: passed ? "pass" : "hard_fail",
+      score: passed ? 1 : 0,
+      explanation: `${count} words; limit is ${limit}`,
+    };
+  },
+};
+```
+
+TypeScript uses `pluginType`, not Python's `plugin_type`. `execute()` may return a `PluginResult` object or a promise of one. Keep registry keys equal to the plugin's `name`: the TypeScript SDK rejects a mismatch.
+
+Create `word-limit.test.ts`:
+
+```typescript
+import { TraceBuilder, attestExpect } from "@attest-ai/core";
+import { attestPlugins, evaluate } from "@attest-ai/vitest";
+import { test } from "vitest";
+import { wordLimit } from "./word-limit";
+
+attestPlugins.register(wordLimit.name, wordLimit);
+
+test("short answer", async (context) => {
+  const trace = new TraceBuilder().setOutput({ message: "Refund processed." }).build();
+  await evaluate(attestExpect(trace).plugin("word-limit", { maxWords: 10 }), { context });
+});
+```
+
+Download and check the engine before the first test run, then run Vitest:
+
+```bash
+npx attest doctor
+npx vitest run word-limit.test.ts
+```
+
+On a cold home directory, the first engine download can exceed Vitest's default five-second test timeout. Running `doctor` first avoids putting that download inside the first test.
+
+## Discover an Installed TypeScript Plugin
+
+A plugin distribution declares JavaScript module paths in its own `package.json`:
 
 ```json
 {
-  "jsonrpc": "2.0",
-  "id": 3,
-  "method": "submit_plugin_result",
-  "params": {
-    "trace_id": "trc_abc123def456",
-    "plugin_name": "toxicity-checker",
-    "assertion_id": "plugin_toxicity_01",
-    "result": {
-      "assertion_id": "plugin_toxicity_01",
-      "status": "pass",
-      "score": 1.0,
-      "explanation": "No toxic content detected",
-      "cost": 0.0,
-      "duration_ms": 0
-    }
+  "name": "word-limit-plugin",
+  "version": "1.0.0",
+  "type": "module",
+  "attest": {
+    "plugins": ["./dist/word-limit.js"]
   }
 }
 ```
 
-See the [JSON-RPC Protocol reference](/reference/engine/json-rpc-protocol/) for the complete specification.
+Build and include that JavaScript file in the published package; it can export `wordLimit` as above or export a plugin instance as its default. Install the package as a **direct** dependency, dev dependency, or optional dependency of the test project. The loader checks installed direct dependencies, not arbitrary source files or transitive packages. Declared module paths must stay inside their package, including after resolving symlinks.
+
+Unlike the Python pytest fixture, the Vitest registry does not discover packages automatically in 1.1.0. Replace explicit registration with a loader call before evaluation (for example, at the top level of the test module):
+
+```typescript
+import { loadPackagePlugins } from "@attest-ai/core";
+import { attestPlugins } from "@attest-ai/vitest";
+
+await loadPackagePlugins(attestPlugins);
+```
+
+`loadPackagePlugins(registry, projectRoot)` defaults `projectRoot` to the current directory. Explicit registration remains useful for local plugins that are not packaged.
+
+## Results and Failures
+
+- Return `pass` when the requirement is met, `hard_fail` when it is not, or `soft_fail` for a recorded non-blocking failure.
+- A missing registration leaves the assertion `not_evaluated` with reason `missing_evidence`; it is not a passing check. Use strict evaluation when missing evidence must fail the test. In CI policy, set `not_evaluated: block` to block unevaluated assertions; the default policy only warns.
+- Loading failures are logged and discovery continues. Check registration if an installed plugin is not evaluated.
+- Execution exceptions and timeouts propagate; the SDK does not turn them into passing results. Handle an expected domain error explicitly if it should produce a structured failure, rather than hiding programming errors with a broad catch.
+- Keep plugins deterministic where possible. A word count is a length check, not a toxicity or readability assessment.
+
+See the [Python Expect DSL](/reference/python/expect-dsl/) and [JSON-RPC Protocol](/reference/engine/json-rpc-protocol/) references for the assertion and underlying protocol contracts.

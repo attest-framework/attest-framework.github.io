@@ -1,74 +1,32 @@
 ---
 title: "Writing a Framework Adapter"
-description: "Learn how to write a custom Attest adapter to instrument your AI framework."
+description: "Convert provider responses or framework events into traces for Attest assertions."
 ---
 
-Learn how to write a custom Attest adapter to instrument your AI framework.
+An adapter translates data your provider or framework already produces into an Attest `Trace`. Write one when a built-in adapter does not cover your integration. You can also use `TraceBuilder` directly without an adapter.
 
-## When to Write an Adapter
+## Choose a Base Class
 
-Write an adapter when you want Attest to automatically capture traces from a framework. Common reasons:
+Both classes are exported from `attest` and `attest.adapters`:
 
-- **Framework not supported** — LangChain, CrewAI, and LlamaIndex work out of the box, but your framework doesn't
-- **Custom agents** — You built your own agent framework and want trace instrumentation
-- **Custom tools** — You have framework-specific tool calling patterns
-- **Cost tracking** — You want to track token costs for a custom provider
+- `BaseProviderAdapter` builds a trace for a single provider response. Implement its four required extraction hooks; the base class handles trace construction.
+- `BaseAdapter` provides `_create_builder()`, `_now_ms()`, and `_resolve_timestamps(started_at_ms, ended_at_ms)`. Use it for framework callbacks or multi-step runs that need their own capture flow.
 
-You don't need an adapter to use Attest. You can always build a `Trace` with `TraceBuilder` (or the `@agent` decorator) and use `expect()` directly.
+Adapters are plain Python classes. There is no adapter registration step: import and construct your adapter where you capture the response. Assertion plugins use a separate registry; see [Writing a Plugin](/tutorials/writing-plugin/).
 
-## Adapter Architecture
+## Install
 
-An adapter is a Python class that:
+In an existing uv project:
 
-1. **Receives a framework or provider response** (or callback events)
-2. **Extracts trace data** (completion, model, tokens, tool calls, timing)
-3. **Builds a `Trace`** with a `TraceBuilder`
-4. **Returns the `Trace`** for assertions
-
-## BaseAdapter Reference
-
-Two base classes live in `attest.adapters` (also exported from `attest`):
-
-- `BaseAdapter` — root class. Provides `_create_builder()` (a `TraceBuilder` carrying the adapter's `agent_id`), `_now_ms()`, and `_resolve_timestamps()`. Use it for framework adapters that build the trace themselves, such as callback-based integrations.
-- `BaseProviderAdapter` — template-method base for single-LLM-call provider adapters. Its `trace_from_response()` builds the whole trace; you implement the extraction hooks.
-
-```python
-from attest import BaseProviderAdapter
-
-class MyProviderAdapter(BaseProviderAdapter):
-    # Required overrides
-    def _extract_completion(self, response) -> str: ...
-    def _extract_model(self, response, **metadata) -> str | None: ...
-    def _extract_total_tokens(self, response) -> int | None: ...
-    def _extract_tool_calls(self, response) -> list[dict]: ...
-
-    # Optional overrides
-    # def _extract_input(self, input_messages, **metadata) -> dict | None
-    # def _build_output(self, response, completion_text, **metadata) -> dict
+```bash
+uv add "attest-ai>=1.1.0" pytest
 ```
 
-`trace_from_response(response, input_messages=None, started_at_ms=None, ended_at_ms=None, **metadata)` resolves timestamps, adds an `llm_call` step, adds one `tool_call` step per extracted tool call, sets the output (`{"message": completion_text}` by default), and records `total_tokens`, `cost_usd`, `latency_ms`, and `model` as trace metadata.
+The following example uses a saved response dictionary, so it needs no provider SDK, credentials, or paid calls.
 
-## Step-by-Step Implementation
+## Implement a Provider Adapter
 
-### Step 1: Understand Your Framework
-
-First, understand what your framework returns. Example with a hypothetical provider client whose response is a dictionary:
-
-```python
-response = {
-    "model": "acme-large",
-    "text": "I will process the refund.",
-    "usage": {"total_tokens": 150},
-    "tool_calls": [
-        {"name": "process_refund", "arguments": {"order_id": "ORD-12345"}},
-    ],
-}
-```
-
-Identify where each piece of trace data lives: the completion text, the model name, the token count, and the tool calls.
-
-### Step 2: Create the Adapter Class
+Create `acme_adapter.py`. Acme is an example response format, not an external SDK:
 
 ```python
 from typing import Any
@@ -77,83 +35,49 @@ from attest import BaseProviderAdapter
 
 
 class AcmeAdapter(BaseProviderAdapter):
-    """Adapter for the Acme provider client."""
+    def _extract_completion(self, response: Any) -> str:
+        return response.get("text", "")
 
-    def _extract_completion(self, response: dict[str, Any]) -> str:
-        return response["text"]
+    def _extract_model(self, response: Any, **metadata: Any) -> str | None:
+        return metadata.get("model") or response.get("model")
 
-    def _extract_model(self, response: dict[str, Any], **metadata: Any) -> str | None:
-        return response.get("model")
+    def _extract_total_tokens(self, response: Any) -> int | None:
+        return response.get("usage", {}).get("total_tokens")
 
-    def _extract_total_tokens(self, response: dict[str, Any]) -> int | None:
-        usage = response.get("usage")
-        return usage["total_tokens"] if usage else None
-
-    def _extract_tool_calls(self, response: dict[str, Any]) -> list[dict[str, Any]]:
+    def _extract_tool_calls(self, response: Any) -> list[dict[str, Any]]:
         return [
-            {"name": call["name"], "args": call["arguments"]}
+            {"name": call["name"], "args": call.get("arguments")}
             for call in response.get("tool_calls", [])
         ]
 ```
 
-Each tool call is a dict with a `name` key and an optional `args` key.
+These are the four required hooks. Return `None` for missing usage or model information and an empty list when there are no tool calls. Each tool-call dictionary requires `name` and may contain `args`.
 
-### Step 3: Register the Adapter
-
-Adapters are plain classes with no registry. Import and construct them where you capture traces. Built-in adapters (`OpenAIAdapter`, `AnthropicAdapter`, `GeminiAdapter`, `OllamaAdapter`, `LangChainAdapter`, and others) are exported from `attest`; export yours the same way from your own package:
+The inherited method has this signature:
 
 ```python
-from attest import expect
-
-adapter = AcmeAdapter(agent_id="support-agent")
-
-response = client.chat(messages)
-trace = adapter.trace_from_response(
-    response,
-    input_messages=messages,
-    cost_usd=0.005,
-    latency_ms=1200,
-)
-
-chain = expect(trace).output_contains("refund")
+trace_from_response(
+    response: Any,
+    input_messages: list[dict[str, Any]] | None = None,
+    started_at_ms: int | None = None,
+    ended_at_ms: int | None = None,
+    **metadata: Any,
+) -> Trace
 ```
 
-### Step 4: Handle Edge Cases
+This is a signature reference, not a standalone function definition. The method builds one `llm_call` step named `completion`, then one `tool_call` step per extracted call. The default trace output is `{"message": completion_text}`. Requested tool calls are not proof of execution: the provider base class does not run tools or record their returned results.
 
-Override the optional hooks when the defaults do not fit. For example, build a structured output alongside the message:
+`input_messages` becomes `trace.input["messages"]` when nonempty. Trace metadata records extracted `total_tokens` and `model`, caller-supplied `cost_usd`, and latency. Explicit `latency_ms` takes precedence; otherwise latency is derived only when both caller timestamps are present. Step timestamps fall back to the current time, but that fallback is not a measurement of the original provider request.
 
-```python
-class AcmeAdapter(BaseProviderAdapter):
-    ...
+## Test Capture and Evaluation
 
-    def _build_output(
-        self,
-        response: dict[str, Any],
-        completion_text: str,
-        **metadata: Any,
-    ) -> dict[str, Any]:
-        return {
-            "message": completion_text,
-            "structured": response.get("structured", {}),
-        }
-```
-
-Return an empty list from `_extract_tool_calls` when the response has no tool calls, and `None` from `_extract_total_tokens` when the provider reports no usage. Adapters do not catch provider errors: let them propagate so a failed call fails the test.
-
-### Step 5: Write Tests
-
-Test your adapter by checking the `Trace` it builds, then evaluate it with the `attest` fixture:
+Create `test_acme_adapter.py`:
 
 ```python
 import pytest
-from attest import expect
 
+from attest import AgentResult, expect
 from acme_adapter import AcmeAdapter
-
-
-@pytest.fixture
-def adapter():
-    return AcmeAdapter(agent_id="support-agent")
 
 
 @pytest.fixture
@@ -162,189 +86,114 @@ def response():
         "model": "acme-large",
         "text": "Refund processed.",
         "usage": {"total_tokens": 150},
-        "tool_calls": [{"name": "process_refund", "arguments": {"order_id": "ORD-1"}}],
+        "tool_calls": [
+            {"name": "process_refund", "arguments": {"order_id": "ORD-1"}},
+        ],
     }
 
 
-def test_adapter_captures_output(adapter, response):
-    trace = adapter.trace_from_response(response)
-
-    assert trace.output == {"message": "Refund processed."}
+def test_capture(response):
+    adapter = AcmeAdapter(agent_id="support-agent")
+    trace = adapter.trace_from_response(
+        response,
+        input_messages=[{"role": "user", "content": "Refund ORD-1"}],
+        started_at_ms=1000,
+        ended_at_ms=1200,
+        cost_usd=0.005,
+    )
     assert trace.agent_id == "support-agent"
-
-
-def test_adapter_captures_tool_calls(adapter, response):
-    trace = adapter.trace_from_response(response)
-
-    tool_steps = [s for s in trace.steps if s.type == "tool_call"]
-    assert [s.name for s in tool_steps] == ["process_refund"]
-
-
-def test_adapter_records_metadata(adapter, response):
-    trace = adapter.trace_from_response(response, cost_usd=0.005, latency_ms=1200)
-
+    assert trace.output == {"message": "Refund processed."}
     assert trace.metadata.total_tokens == 150
     assert trace.metadata.cost_usd == 0.005
+    assert trace.metadata.latency_ms == 200
+    tools = [step for step in trace.steps if step.type == "tool_call"]
+    assert [step.name for step in tools] == ["process_refund"]
+    assert tools[0].args == {"order_id": "ORD-1"}
 
 
-def test_trace_works_with_expect(adapter, response, attest):
-    trace = adapter.trace_from_response(response, cost_usd=0.005)
-
-    chain = (
-        expect(trace)
+def test_evaluate(response, attest):
+    trace = AcmeAdapter().trace_from_response(response, cost_usd=0.005)
+    result = AgentResult(trace=trace)
+    verdict = attest.evaluate(
+        expect(result)
         .output_contains("Refund")
         .required_tools(["process_refund"])
         .cost_under(0.10)
     )
-    attest.evaluate(chain)
+    assert verdict.passed
+
+
+def test_missing_optional_data():
+    trace = AcmeAdapter().trace_from_response({"text": "Hello."})
+    assert trace.metadata.total_tokens is None
+    assert [step for step in trace.steps if step.type == "tool_call"] == []
 ```
 
-## Real-World Example: LangChain Adapter
+Run the tests:
 
-Framework adapters that cannot map a single response use `BaseAdapter` and collect events instead. The built-in LangChain integration is a callback handler (`LangChainCallbackHandler`) wrapped by a context manager (`LangChainAdapter`):
+```bash
+uv run pytest test_acme_adapter.py
+```
+
+`AgentResult(trace=trace)` wraps captured data; `attest.evaluate()` returns the evaluated result. `expect(trace)` is also supported and wraps the trace automatically. Always evaluate the chain: leaving assertions unevaluated fails the test in 1.1.0.
+
+## Optional Provider Hooks
+
+Override these only when your provider needs different handling. The signatures below include `self` and use `Any` from `typing`:
+
+| Hook | Default |
+|------|---------|
+| `_extract_input(self, input_messages: list[dict[str, Any]] \| None, **metadata: Any) -> dict[str, Any] \| None` | Nonempty messages become `{"messages": input_messages}` |
+| `_build_output(self, response: Any, completion_text: str, **metadata: Any) -> dict[str, Any]` | `{"message": completion_text}` |
+| `_extract_token_split(self, response: Any) -> tuple[int \| None, int \| None]` | `(None, None)` |
+| `_extract_refusal(self, response: Any) -> str \| None` | `None` |
+
+Token splits are stored as `input_tokens` and `output_tokens` in the LLM step's result. A nonempty refusal is stored as `refusal` in that result; if your provider treats a refusal as the visible answer, your completion hook should return that text as well. The built-in OpenAI adapter demonstrates this for Chat Completions and Responses API objects.
+
+For structured output, extend the complete adapter rather than replacing it with an incomplete subclass:
+
+```python
+class StructuredAcmeAdapter(AcmeAdapter):
+    def _build_output(
+        self, response: Any, completion_text: str, **metadata: Any
+    ) -> dict[str, Any]:
+        return {
+            "message": completion_text,
+            "structured": response.get("structured", {}),
+        }
+```
+
+Place this class in `acme_adapter.py` after `AcmeAdapter`.
+
+## Framework Runs and Callbacks
+
+For a framework that emits several calls, use `BaseAdapter` and capture actual events instead of inventing steps from its configuration. `_create_builder()` preserves the adapter's `agent_id`. Record call arguments, results, and timestamps in framework hooks, then set the final output and call `build()` once.
+
+The built-in LangChain adapter illustrates a callback-based flow. With your `agent_executor` already configured:
 
 ```python
 from attest import LangChainAdapter
 
 adapter = LangChainAdapter(agent_id="support-agent")
-
 with adapter.capture() as handler:
-    agent_executor.invoke({"input": "Refund ORD-12345"}, config={"callbacks": [handler]})
-
+    agent_executor.invoke(
+        {"input": "Refund ORD-1"}, config={"callbacks": [handler]}
+    )
 trace = adapter.trace
 ```
 
-`capture()` yields a handler that records chain, LLM, and tool callbacks, and builds the `Trace` when the block exits. To write a similar adapter, subclass `BaseAdapter`, accumulate events in your framework's hooks, and build the trace with `self._create_builder()`:
+Install its extra with `uv add "attest-ai[langchain]>=1.1.0"`. `capture()` yields a `LangChainCallbackHandler` and builds the trace on successful exit. The handler records callbacks that actually occur; framework configuration alone does not establish that a tool or agent ran. In particular, the CrewAI adapter produces summary-only traces without steps.
 
-```python
-from attest import BaseAdapter
-from attest.trace import TraceBuilder
+For nested agents, see the [Multi-Agent guide](/guides/multi-agent/) rather than flattening child traces into a single provider response.
 
+## Timing, Costs, and Errors
 
-class AcmeAgentAdapter(BaseAdapter):
-    def run(self, agent, prompt: str):
-        builder: TraceBuilder = self._create_builder()
-        builder.set_input(prompt=prompt)
+Measure timestamps around the real provider request, not around conversion of an already-received response. Supply `cost_usd` from your billing calculation when you need cost assertions: the base class does not infer currency costs from token counts. Match your provider's rate units when calculating costs.
 
-        started = self._now_ms()
-        output = agent.run(prompt)
-        ended = self._now_ms()
-
-        builder.add_llm_call(
-            "completion",
-            result={"completion": output.text},
-            started_at_ms=started,
-            ended_at_ms=ended,
-        )
-        for call in output.tool_calls:
-            builder.add_tool_call(call.name, args=call.args, result=call.result)
-
-        builder.set_output(message=output.text)
-        builder.set_metadata(total_tokens=output.total_tokens, latency_ms=ended - started)
-        return builder.build()
-```
-
-## Testing Your Adapter
-
-### Unit Tests
-
-Test adapter components in isolation by feeding them canned responses:
-
-```python
-def test_tokens_extracted():
-    adapter = AcmeAdapter()
-    trace = adapter.trace_from_response({"text": "hi", "usage": {"total_tokens": 42}})
-
-    assert trace.metadata.total_tokens == 42
-```
-
-### Integration Tests
-
-Test with a real client:
-
-```python
-def test_adapter_with_real_client(attest):
-    adapter = AcmeAdapter()
-    messages = [{"role": "user", "content": "What is 2+2?"}]
-
-    trace = adapter.trace_from_response(client.chat(messages), input_messages=messages)
-
-    attest.evaluate(expect(trace).output_contains("4"))
-```
-
-### Attest Tests
-
-Evaluate the trace with `expect()` and the `attest` fixture:
-
-```python
-def test_adapter_trace_works_with_expect(adapter, response, attest):
-    trace = adapter.trace_from_response(response, cost_usd=0.05)
-
-    attest.evaluate(expect(trace).output_contains("Refund").cost_under(0.10))
-```
-
-## Advanced: Custom Trace Tree
-
-For multi-agent frameworks, nest a sub-agent's trace under the parent with `delegate()` while an `@agent` function is running:
-
-```python
-from attest import agent, delegate
-
-
-@agent("orchestrator")
-def orchestrator(builder, task: str):
-    with delegate("researcher") as child:
-        child.add_tool_call("search_web", args={"q": task})
-        child.set_output(message="Findings.")
-    return {"message": "Done."}
-```
-
-Then use the trace-tree assertions:
-
-```python
-result = orchestrator(task="refund policy")
-
-attest.evaluate(expect(result).agent_called("researcher").delegation_depth(2))
-```
-
-See the [Multi-Agent guide](/guides/multi-agent/) for the full set of cross-agent assertions.
-
-## Troubleshooting
-
-**"Adapter not capturing cost"**
-
-Provider adapters read cost from the `cost_usd` keyword passed to `trace_from_response()`. If your framework does not expose cost, calculate it from token counts:
-
-```python
-cost = (tokens_in * input_rate + tokens_out * output_rate) / 1000
-trace = adapter.trace_from_response(response, cost_usd=cost)
-```
-
-**"Latency seems wrong"**
-
-Pass `latency_ms`, and `started_at_ms` and `ended_at_ms` for the step timing. Wrap the whole provider call, including framework overhead:
-
-```python
-import time
-
-started = int(time.time() * 1000)
-response = client.chat(messages)
-ended = int(time.time() * 1000)
-
-trace = adapter.trace_from_response(
-    response,
-    started_at_ms=started,
-    ended_at_ms=ended,
-    latency_ms=ended - started,
-)
-```
-
-**"Trace is incomplete"**
-
-Use callbacks or hooks to capture all events, not just the final result. For LangChain, pass the handler from `adapter.capture()` in `config={"callbacks": [handler]}`.
+Let provider and extraction errors propagate so the test reports the failed capture. Test saved responses for missing usage, empty output, refusals, structured output, and tool arguments before adding live-provider tests.
 
 ## Related
 
-- **[Adapters Reference](/reference/python/adapters/)** — All built-in adapters
-- **[Expect DSL Reference](/reference/python/expect-dsl/)** — Assertion methods
-- **[Framework Adapters Guide](/guides/framework-adapters/)** — Adapter architecture
+- [Adapters Reference](/reference/python/adapters/) — Built-in adapters and maturity
+- [Expect DSL Reference](/reference/python/expect-dsl/) — Assertion methods
+- [Framework Adapters Guide](/guides/framework-adapters/) — Adapter capture flows

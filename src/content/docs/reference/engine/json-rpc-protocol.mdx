@@ -1,147 +1,53 @@
 ---
 title: "JSON-RPC Protocol"
-description: "Wire protocol specification for communication between Attest SDKs and the Go engine."
+description: "Attest 1.1.0 SDK-to-engine methods, parameters, and result semantics."
 ---
 
-The Attest engine communicates with SDKs via **JSON-RPC 2.0 over NDJSON** (newline-delimited JSON) on stdin/stdout. Each message is a single JSON object terminated by `\n`.
+The SDK sends traces and assertions to a local engine process and receives verdicts. This reference describes the 1.1.0 wire format; normal tests should use the Python or TypeScript SDK rather than construct requests themselves.
 
-## Transport
+## Transport and lifecycle
 
-| Property | Value |
-|----------|-------|
-| Protocol | JSON-RPC 2.0 |
-| Encoding | NDJSON (one JSON object per line) |
-| Transport | stdin (SDK to engine), stdout (engine to SDK) |
-| Engine stderr | Log output (not protocol traffic) |
-| Encoding | UTF-8, compact JSON (no whitespace) |
+The protocol is JSON-RPC 2.0 over UTF-8 NDJSON on stdin/stdout: one JSON object followed by a newline per message. Engine logs go to stderr, not stdout. The stdio engine processes one request at a time; parallel embedding and judge work happens inside a batch.
 
-The SDK writes requests to the engine's stdin and reads responses from stdout. The engine's stderr carries log messages and is not part of the protocol.
+Initialize once, evaluate or query as needed, then shut down. Requests carry `jsonrpc`, `id`, `method`, and method-specific `params`. In 1.1.0 the engine echoes numeric, string, or null IDs exactly. A valid request without an `id` is a notification: it executes without a reply. The engine emits no unsolicited drift notifications.
 
-## Request Format
+A minimal handshake on the wire is:
 
 ```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "method": "initialize",
-  "params": { ... }
-}
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"sdk_name":"attest-python","sdk_version":"1.1.0","protocol_version":1,"required_capabilities":["layers_1_4"],"preferred_encoding":"json"}}
 ```
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `jsonrpc` | `string` | Always `"2.0"` |
-| `id` | `integer` | Auto-incrementing request ID for response correlation |
-| `method` | `string` | RPC method name |
-| `params` | `object` | Method-specific parameters |
+Success responses contain `result`; failures contain `error` with `code`, `message`, and optional `data` (`error_type`, `retryable`, `detail`). SDK callers correlate replies by ID, not arrival order. SDKs reject evaluation replies whose assertion IDs differ from the request. A request timeout restarts the engine and fails pending requests; it does not turn a late reply into another test's verdict.
 
-## Response Format
+## `initialize`
 
-### Success
+| Parameter | Type | Meaning |
+|---|---|---|
+| `sdk_name` | string | Client identifier |
+| `sdk_version` | string | Client version, for example `1.1.0` |
+| `protocol_version` | integer | Must be `1` |
+| `required_capabilities` | string[] | Capabilities the client needs |
+| `preferred_encoding` | string | Use `json`; the engine returns JSON |
 
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "result": { ... }
-}
-```
+| Result field | Meaning |
+|---|---|
+| `engine_version` | Binary version (`1.1.0` for this release) |
+| `protocol_version` | `1` |
+| `capabilities` | Runtime capabilities, dependent on configured providers and simulation |
+| `missing` | Requested capabilities not available |
+| `compatible` | Whether `missing` is empty |
+| `encoding` | `json` |
+| `max_concurrent_requests` | `1` in stdio mode |
+| `max_trace_size_bytes` | `10485760` (10 MiB) |
+| `max_steps_per_trace` | `10000` |
 
-### Error
+Do not treat the capabilities list as a fixed list shared by all installations. A protocol-version mismatch returns a session error. Reinitializing the same session also returns a session error.
 
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "error": {
-    "code": 1001,
-    "message": "Invalid trace: missing required field 'output'",
-    "data": {
-      "error_type": "validation",
-      "retryable": false,
-      "detail": "Trace output is required"
-    }
-  }
-}
-```
+## `evaluate_batch`
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `error.code` | `integer` | Error code (see table below) |
-| `error.message` | `string` | Human-readable error description |
-| `error.data` | `object \| null` | Structured error metadata |
-| `error.data.error_type` | `string` | Error category |
-| `error.data.retryable` | `boolean` | Whether the request can be retried |
-| `error.data.detail` | `string` | Additional context |
+Parameters are `trace`, `assertions`, optional `budget`, and optional `context`. Each assertion has `assertion_id`, `type`, `spec`, and optional `request_id` and `scope_id`. SDKs assign stable scheme-2 assertion IDs; direct protocol clients must supply IDs and correlate results by them, not array position.
 
-## Methods
-
-### `initialize`
-
-Handshake between SDK and engine. Must be the first request.
-
-**Request:**
-
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "method": "initialize",
-  "params": {
-    "sdk_name": "attest-python",
-    "sdk_version": "1.0.0",
-    "protocol_version": 1,
-    "required_capabilities": ["layers_1_4"],
-    "preferred_encoding": "json"
-  }
-}
-```
-
-| Param | Type | Description |
-|-------|------|-------------|
-| `sdk_name` | `string` | SDK identifier (`attest-python` or `attest-typescript`) |
-| `sdk_version` | `string` | SDK version |
-| `protocol_version` | `integer` | Requested protocol version (currently `1`) |
-| `required_capabilities` | `string[]` | Capabilities the SDK requires |
-| `preferred_encoding` | `string` | Wire encoding preference (`"json"`) |
-
-**Response:**
-
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "result": {
-    "engine_version": "1.0.0",
-    "protocol_version": 1,
-    "capabilities": ["layers_1_4", "trace_tree", "continuous_eval", "plugins", "llm_judge", "simulation", "layers_5_6"],
-    "missing": [],
-    "compatible": true,
-    "encoding": "json",
-    "max_concurrent_requests": 1,
-    "max_trace_size_bytes": 10485760,
-    "max_steps_per_trace": 10000
-  }
-}
-```
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `engine_version` | `string` | Engine binary version |
-| `protocol_version` | `integer` | Negotiated protocol version |
-| `capabilities` | `string[]` | Available engine capabilities |
-| `missing` | `string[]` | Requested capabilities not available |
-| `compatible` | `boolean` | `true` if all required capabilities are present |
-| `encoding` | `string` | Negotiated encoding |
-| `max_concurrent_requests` | `integer` | Max parallel evaluations |
-| `max_trace_size_bytes` | `integer` | Max trace payload size in bytes |
-| `max_steps_per_trace` | `integer` | Max steps allowed per trace |
-
-### `evaluate_batch`
-
-Evaluate a batch of assertions against a trace.
-
-**Request:**
+This example checks a recorded cost without making a model call:
 
 ```json
 {
@@ -151,326 +57,124 @@ Evaluate a batch of assertions against a trace.
   "params": {
     "trace": {
       "schema_version": 1,
-      "trace_id": "trc_abc123def456",
-      "agent_id": "weather-agent",
-      "input": {
-        "query": "weather in tokyo"
-      },
-      "steps": [
-        {
-          "type": "llm_call",
-          "name": "gpt-4.1",
-          "args": { "messages": [{"role": "user", "content": "weather in tokyo"}] },
-          "result": { "content": "Let me check." }
-        },
-        {
-          "type": "tool_call",
-          "name": "get_weather",
-          "args": { "city": "tokyo" },
-          "result": { "temp_c": 22, "condition": "sunny" }
-        }
-      ],
-      "output": {
-        "message": "Tokyo is 22C and sunny."
-      },
-      "metadata": {
-        "total_tokens": 350,
-        "cost_usd": 0.001,
-        "latency_ms": 800
-      },
-      "parent_trace_id": null
+      "trace_id": "cost-example",
+      "agent_id": "example",
+      "input": {},
+      "steps": [],
+      "output": {"message": "Done"},
+      "metadata": {"cost_usd": 0.001}
     },
-    "assertions": [
-      {
-        "assertion_id": "assert_a1b2c3d4",
-        "type": "content",
-        "spec": {
-          "target": "output.message",
-          "check": "contains",
-          "value": "tokyo",
-          "case_sensitive": false
-        }
-      },
-      {
-        "assertion_id": "assert_e5f6g7h8",
-        "type": "constraint",
-        "spec": {
-          "field": "metadata.cost_usd",
-          "operator": "lte",
-          "value": 0.01
-        }
-      }
-    ]
+    "assertions": [{
+      "assertion_id": "cost-check",
+      "type": "constraint",
+      "spec": {"field": "metadata.cost_usd", "operator": "lte", "value": 0.01}
+    }]
   }
 }
 ```
 
-**Response:**
+`budget` can contain `max_judge_calls` (integer) and `max_cost_usd` (number). Omitted limits are unlimited at batch level; session limits still apply. These cap Attest-initiated model calls, not the agent cost recorded in the trace. `context` can contain `test_id`, `file`, and `line`; the engine uses it for assertion-spec recording when `ATTEST_CONTRACTS_DIR` is set.
+
+### Batch result
+
+| Field | Meaning |
+|---|---|
+| `results` | One verdict row per assertion, including skipped evaluation; correlate by `assertion_id` |
+| `total_cost` | Sum of assertion-result costs; not a complete model-spend ledger |
+| `total_duration_ms` | Sum of assertion evaluation durations, not batch wall-clock time |
+| `simulated` | `false` for engine-produced results, including engine simulation mode |
+| `usage` | Attest-initiated model usage for the batch |
+| `budget_exceeded` | Optional flag when the session soft-failure budget was exceeded; all rows are still returned |
+
+`usage` contains `model_calls`, `judge_calls`, `input_tokens`, `output_tokens`, `cached_tokens`, `cost_usd`, `retry_cost_usd`, `unpriced_calls`, and `budget_refused`. Use it to account for model calls, including retries and embedding calls. Nonzero `unpriced_calls` means reported USD spend is incomplete. Neither this usage nor assertion evaluation cost is the agent's own `metadata.cost_usd`.
+
+### Assertion results
+
+Required row fields are `assertion_id`, `status`, `score`, `explanation`, `cost`, and `duration_ms`. Scores are evaluation scores, not statistical confidence. Status is one of:
+
+- `pass`: the assertion met its contract.
+- `hard_fail`: the assertion failed.
+- `soft_fail`: a soft assertion failed; policy determines its CI consequence.
+- `not_evaluated`: no verdict was produced; `reason` explains why. A zero score here is not a failure score.
+
+Reasons include `provider_not_configured`, `provider_unavailable`, `provider_auth`, `judge_malformed`, `judge_abstained`, `simulation`, `missing_evidence`, `short_circuited`, and `budget_exhausted`. SDK replay can additionally report `replay_miss`.
+
+Optional diagnostic fields include `request_id`, `scope_id`, `spec_hash`, `threshold_source`, `layer`, `type`, `trace_node_path`, `expected`, `actual`, `suggested_action`, `judge_metadata`, `drift`, `failure_class`, and `trial`. Omitted optional fields are not necessarily serialized as null. `threshold_source` distinguishes `static`, `dynamic`, and `dynamic_unavailable` (static fallback after a history lookup failure).
+
+### Assertion types
+
+| Type | Layer | Important spec fields |
+|---|---|---|
+| `schema` | 1 | `target`, `schema` |
+| `constraint` | 2 | `field`, `operator`, `value` or bounds |
+| `trace` | 3 | `check` and check-specific tool/argument fields |
+| `trace_tree` | 3 | `check` and check-specific agent/tree fields |
+| `effect` | 3 | `check`, `world`, `resource`, optional `where`, check-specific bounds or relations |
+| `content` | 4 | `target`, `check`, `value` or `values`, optional `case_sensitive`, `soft` |
+| `embedding` | 5 | `target`, `reference`, `threshold`, optional `soft` |
+| `llm_judge` | 6 | `target`, `criteria`, `rubric`, `threshold`, optional `model`, `soft` |
+| `plugin` | Plugins | SDK-computed plugin result lookup |
+
+The public model is six evaluated layers plus plugins. Trace-tree checks are Layer 3 in 1.1.0. See [Assertion Pipeline](/architecture/assertion-pipeline/) for evaluation order, relational effects, and scoring.
+
+## `submit_plugin_result`
+
+Submit the SDK-computed result **before** evaluating the corresponding plugin assertion:
 
 ```json
-{
-  "jsonrpc": "2.0",
-  "id": 2,
-  "result": {
-    "results": [
-      {
-        "assertion_id": "assert_a1b2c3d4",
-        "status": "pass",
-        "score": 1.0,
-        "explanation": "output.message contains 'tokyo' (case-insensitive)",
-        "cost": 0.0,
-        "duration_ms": 0
-      },
-      {
-        "assertion_id": "assert_e5f6g7h8",
-        "status": "pass",
-        "score": 1.0,
-        "explanation": "metadata.cost_usd (0.001) <= 0.01",
-        "cost": 0.0,
-        "duration_ms": 0
-      }
-    ],
-    "total_cost": 0.0,
-    "total_duration_ms": 1
-  }
-}
+{"jsonrpc":"2.0","id":3,"method":"submit_plugin_result","params":{"trace_id":"cost-example","plugin_name":"compliance","assertion_id":"plugin-check","result":{"status":"pass","score":1.0,"explanation":"Rules satisfied"}}}
 ```
 
-#### Assertion Result Fields
+`result` contains `status`, `score`, `explanation`, and optional `metadata`. It is not a full assertion-result row: do not send nested `assertion_id`, `cost`, or `duration_ms` as result fields. A valid submission returns `{"accepted":true}` and is stored by trace ID, assertion ID, and plugin name. It need not match a pending assertion. Submission alone neither increments evaluated-assertion statistics nor records a history verdict; `evaluate_batch` does that when it reports the result.
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `assertion_id` | `string` | Matches the request assertion ID |
-| `status` | `string` | `"pass"`, `"soft_fail"`, or `"hard_fail"` |
-| `score` | `float` | 0.0 to 1.0 confidence score |
-| `explanation` | `string` | Human-readable reason |
-| `cost` | `float` | USD cost of this assertion (0 for layers 1-4) |
-| `duration_ms` | `integer` | Evaluation time |
-| `request_id` | `string \| null` | Optional correlation ID |
+## `validate_trace_tree`
 
-### `submit_plugin_result`
+Parameters: `{"trace": <trace>}`. The result contains `valid`, optional `errors`, `depth`, `agent_count`, `agent_ids`, `aggregate_tokens`, `aggregate_cost_usd`, and `aggregate_latency_ms`. This inspects the nested trace tree without requiring an assertion batch.
 
-Submit an externally-computed plugin result to the engine.
+## `query_drift`
 
-**Request:**
+Read-only query of the newest recorded assertion run against its historical baseline. Parameters:
 
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 3,
-  "method": "submit_plugin_result",
-  "params": {
-    "trace_id": "trc_abc123def456",
-    "plugin_name": "toxicity-checker",
-    "assertion_id": "assert_plugin_01",
-    "result": {
-      "assertion_id": "assert_plugin_01",
-      "status": "pass",
-      "score": 0.95,
-      "explanation": "No toxic content detected",
-      "cost": 0.0,
-      "duration_ms": 50
-    }
-  }
-}
-```
+| Parameter | Meaning |
+|---|---|
+| `assertion_id` | History key from the assertion report or runner scope |
+| `static_threshold` | Optional number in [0, 1]; omitted/null means `0.8`; explicit zero is honored |
+| `window_size` | Accepted but ignored; the window is fixed at 50 |
 
-**Response:**
+The result contains `report` and the resolved `static_threshold`. `report` contains `assertion_id`, `mean`, `stddev`, `count`, `latest_score`, `deviation` (latest minus mean), and `status` (`ok` or `drift_detected`).
 
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 3,
-  "result": {
-    "accepted": true
-  }
-}
-```
+The baseline uses up to 50 passing and soft-failing runs before the newest run, ordered by insertion. It needs at least 10 eligible prior runs. The bar is `max(static_threshold, mean - 2 * max(stddev, 0.02))`. With an active baseline, a latest score below the bar produces `drift_detected`; otherwise the status is `ok`. Hard failures do not enter the baseline. An unavailable history store returns an engine error. Drift from an evaluated dynamic assertion is also carried in `results[].drift`, not an unsolicited notification.
 
-### `query_drift`
+## `generate_user_message`
 
-Report whether the newest recorded run of an assertion departs from its baseline. Requires an initialized session. Read-only: it never writes history.
+Available only when a judge provider is configured. This method uses that provider to generate a user message; it is not the provider-free assertion simulation mode.
 
-**Request:**
+Parameters are `persona` (`name`, `system_prompt`, `style`, `temperature`, optional `max_tokens`), `conversation_history` (objects with `role` and `content`), and optional `fault_config` (`error_rate`, `latency_jitter_ms`, `content_corruption`, `timeout_after_ms`). The result is `{"message":"..."}`. Model-call budgets apply.
 
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 4,
-  "method": "query_drift",
-  "params": {
-    "assertion_id": "a2_b328096a69ea78d9327faeb1d4832f97",
-    "static_threshold": 0.6
-  }
-}
-```
+## `shutdown`
 
-| Param              | Type               | Required | Description                                                                                                                                                                 |
-| ------------------ | ------------------ | -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `assertion_id`     | `string`           | yes      | History key: the assertion id from the report (id scheme 2) or the runner scope.                                                                                            |
-| `static_threshold` | number in [0, 1]   | no       | The assertion's static pass threshold; the dynamic bar never falls below it. Omitted or `null` means `0.8`; an explicit `0` is honoured. Anything else outside [0, 1], or a non-number, is rejected with `ASSERTION_ERROR` (1002, `invalid query_drift params`). |
-| `window_size`      | `integer`          | no       | Accepted and ignored: the window is fixed at 50.                                                                                                                            |
+Send `params: {}` after initialization. The result contains `sessions_completed` and `assertions_evaluated`; the session enters shutdown. Do not assume fixed SDK signal timings as part of the wire contract.
 
-**Response:**
+## Errors
 
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 4,
-  "result": {
-    "report": {
-      "assertion_id": "a2_b328096a69ea78d9327faeb1d4832f97",
-      "mean": 0.7,
-      "stddev": 0.0,
-      "count": 10,
-      "latest_score": 0.7,
-      "deviation": 0.0,
-      "status": "ok"
-    },
-    "static_threshold": 0.6
-  }
-}
-```
+| Code | Meaning |
+|---|---|
+| `1001` | Invalid trace |
+| `1002` | Assertion/parameter error |
+| `2001` | Provider error |
+| `3001` | Engine error |
+| `3002` | Timeout |
+| `3003` | Session-state error |
+| `-32700` | JSON parse error |
+| `-32600` | Invalid JSON-RPC request |
+| `-32601` | Method not found |
+| `-32602` | Invalid parameters |
+| `-32603` | Internal JSON-RPC error |
 
-| Field              | Type      | Description                                                                 |
-| ------------------ | --------- | --------------------------------------------------------------------------- |
-| `mean`             | `number`  | Mean of the baseline scores                                                 |
-| `stddev`           | `number`  | Standard deviation of the baseline scores                                   |
-| `count`            | `integer` | Number of baseline rows                                                     |
-| `latest_score`     | `number`  | Score of the newest run, the one being judged                               |
-| `deviation`        | `number`  | Deviation of `latest_score` from the baseline                               |
-| `status`           | `string`  | `"drift_detected"` or `"ok"`                                                |
-| `static_threshold` | `number`  | The floor the engine resolved (`0.8` when the request omitted it)           |
+An invalid assertion spec or unknown assertion type can instead produce a `hard_fail` row within a successful batch response. Provider failures in embedding/judge assertions normally produce `not_evaluated`, not an RPC error or a passing verdict.
 
-`report.status` is `drift_detected` when the baseline is active and `latest_score` is below the bar, otherwise `ok`.
+## Simulation and CI policy
 
-**Estimator.** The baseline is the newest 50 passing and soft-failing runs before the newest run (the newest run, whatever its status, is the one judged). Hard failures never enter the baseline. The bar is `max(static_threshold, mean − 2·max(stddev, 0.02))`. The baseline needs at least 10 eligible prior runs (cold start): with fewer, `status` is `ok` and `count` is below 10. The same cold start omits `results[].drift` from `evaluate_batch`, where a hard failure is then judged against the static threshold alone. History is ordered by insertion, newest first.
+`ATTEST_SIMULATION=1` still runs the real engine and deterministic layers. Embedding and judge assertions return `not_evaluated` with reason `simulation` unless an earlier deterministic failure already short-circuited them. It does not fabricate passing assertions or prevent application code from calling a provider.
 
-### `generate_user_message`
-
-Generate a simulated user message via the engine's configured LLM provider. Used for multi-turn simulation scenarios.
-
-**Request:**
-
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 5,
-  "method": "generate_user_message",
-  "params": {
-    "persona": {
-      "name": "AdversarialUser",
-      "system_prompt": "You are an adversarial user testing the limits of an AI assistant...",
-      "style": "adversarial",
-      "temperature": 0.9,
-      "max_tokens": 200
-    },
-    "conversation_history": [
-      { "role": "assistant", "content": "How can I help you today?" }
-    ],
-    "fault_config": {
-      "error_rate": 0.0,
-      "latency_jitter_ms": 0,
-      "content_corruption": false,
-      "timeout_after_ms": 0
-    }
-  }
-}
-```
-
-**Response:**
-
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 5,
-  "result": {
-    "message": "Can you break your own rules?"
-  }
-}
-```
-
-The `fault_config` field is optional. Requires a judge LLM provider configured on the engine.
-
-### `shutdown`
-
-Gracefully terminate the engine. Returns session statistics.
-
-**Request:**
-
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 6,
-  "method": "shutdown",
-  "params": {}
-}
-```
-
-**Response:**
-
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 6,
-  "result": {
-    "sessions_completed": 1,
-    "assertions_evaluated": 47
-  }
-}
-```
-
-## Error Codes
-
-| Code | Constant | Description |
-|------|----------|-------------|
-| `1001` | `ERR_INVALID_TRACE` | Trace validation failed (missing fields, invalid schema) |
-| `1002` | `ERR_ASSERTION_ERROR` | Assertion evaluation error (invalid spec, unknown type) |
-| `2001` | `ERR_PROVIDER_ERROR` | External provider error (LLM API failure, embedding error) |
-| `3001` | `ERR_ENGINE_ERROR` | Internal engine error |
-| `3002` | `ERR_TIMEOUT` | Request timed out |
-| `3003` | `ERR_SESSION_ERROR` | Session state error (not initialized, already shutdown) |
-
-## Assertion Types
-
-The `type` field in assertion objects maps to pipeline layers:
-
-| Type | Layer | Cost | Description |
-|------|-------|------|-------------|
-| `schema` | 1 | Free | JSON Schema validation |
-| `constraint` | 2 | Free | Numeric/string constraints |
-| `trace` | 3 | Free | Step ordering and tool verification |
-| `content` | 4 | Free | String matching, regex, keywords |
-| `embedding` | 5 | ~$0.001 | Semantic similarity via embeddings |
-| `llm_judge` | 6 | ~$0.01 | Natural language evaluation |
-| `trace_tree` | 7 | Free | Multi-agent delegation analysis |
-
-## Simulation Mode
-
-When `ATTEST_SIMULATION=1` is set, the SDK bypasses the engine entirely. `evaluate_batch` returns deterministic `pass` results for all assertions with zero cost. No subprocess is spawned.
-
-```json
-{
-  "results": [
-    {
-      "assertion_id": "assert_a1b2c3d4",
-      "status": "pass",
-      "score": 1.0,
-      "explanation": "[simulation] content assertion passed (deterministic)",
-      "cost": 0.0,
-      "duration_ms": 0
-    }
-  ],
-  "total_cost": 0.0,
-  "total_duration_ms": 0
-}
-```
-
-## Concurrency Model
-
-The `AttestClient` wraps `EngineManager` with request/response correlation:
-
-- A background reader loop reads NDJSON lines from stdout and resolves pending futures by request ID
-- A write lock serializes outbound requests (stdin is sequential)
-- Multiple callers can await independent futures concurrently
-- The pytest plugin runs the engine event loop on a dedicated daemon thread, making both sync (`evaluate`) and async (`evaluate_async`) paths safe from any calling context
+A judge abstention, malformed reply, or rejected credential never becomes a passing score. The default policy warns on `not_evaluated`; set `not_evaluated: block` when missing verdicts must block CI. An unevaluated `expect()` chain is a separate SDK error: pytest and Vitest fail a test that forgets to evaluate it, including assertions appended after evaluation.

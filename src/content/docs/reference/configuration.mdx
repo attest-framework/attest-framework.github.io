@@ -1,112 +1,144 @@
 ---
 title: "Configuration Reference"
-description: "Environment variables and runtime configuration for Attest engine, SDKs, and assertions."
+description: "Environment variables and runtime configuration for Attest 1.1.0."
 ---
 
-All Attest configuration is driven by environment variables. No config files are required.
+Use these settings to choose the engine, keep evaluation local, or put a hard limit on model calls. The engine reads its environment when it starts; set variables before running tests. Attest does not automatically load a `.env` file. Tests can also use SDK configuration and CLI options; policies and baselines have their own files.
+
+```bash
+ATTEST_SIMULATION=1 uv run pytest
+uv run attest doctor --json
+```
+
+Simulation prevents **Attest's embedding and judge calls**, not network calls made by your agent. Deterministic checks still run; Layers 5–6 return `not_evaluated: simulation`. Use replay and the egress guard when the agent itself must not call hosted providers.
 
 ## Engine Discovery
 
 | Variable | Purpose | Default |
-|----------|---------|---------|
-| `ATTEST_ENGINE_PATH` | Absolute path to engine binary — skips all discovery | unset |
-| `ATTEST_ENGINE_NO_DOWNLOAD` | `1` / `true` / `yes` disables auto-download | unset (download enabled) |
+|---|---|---|
+| `ATTEST_ENGINE_PATH` | Explicit engine binary path | unset |
+| `ATTEST_ENGINE_NO_DOWNLOAD` | `1`, `true`, or `yes` disables automatic download | unset |
 
-The SDK resolves the engine binary in this order:
+Discovery order: explicit `engine_path` / `enginePath` (or pytest `--attest-engine`) → `ATTEST_ENGINE_PATH` → executable on `PATH` → `~/.attest/bin/<ENGINE_VERSION>/` → release download. Empty `PATH` entries are skipped. There is no monorepo/local-directory fallback and no unversioned cache fallback.
 
-```
-ATTEST_ENGINE_PATH
-  → PATH lookup
-  → ~/.attest/bin/ (shared cache, version-checked)
-  → ../../bin/ (monorepo dev layout)
-  → ./bin/ (local)
-  → auto-download from GitHub Releases
-  → error
-```
+The first binary found must report the SDK's exact required engine version, **1.1.0** for this release; a mismatch stops discovery. Downloads are verified against hashes **shipped inside the SDK**, not a checksum fetched alongside the binary. Source/editable installs without that table cannot download; build the engine and set `ATTEST_ENGINE_PATH`. `ATTEST_CACHE_DIR` does not change the engine binary cache location.
 
-## Engine Runtime
-
-| Variable | Purpose | Default | Since |
-|----------|---------|---------|-------|
-| `ATTEST_ENGINE_TIMEOUT` | Max seconds to wait for an engine response before the SDK raises a timeout error | `30` | v0.5.1 |
-| `ATTEST_SIMULATION` | Enable simulation mode — deterministic mock results, no engine process, no API calls | unset | v0.4.0 |
-
-## Cost & Budget
-
-| Variable | Purpose | Default | Since |
-|----------|---------|---------|-------|
-| `ATTEST_MAX_SOFT_FAILURES` | Maximum soft failures allowed in one engine session, counted across batches; `0` allows none. Exceeding it fails the batch. Replaces the removed `ATTEST_BUDGET_MAX_COST`, which counted soft failures, not cost. | unset (no limit) | v1.0.0-rc.1 |
-| `ATTEST_MAX_JUDGE_CALLS` | Maximum judge-provider requests in one engine session. A request that cannot reserve a call is not sent and its assertion is `not_evaluated: budget_exhausted`. | unset (no limit) | v1.0.0 |
-| `ATTEST_BUDGET_USD` | Maximum USD for attest-initiated model calls (layer 5 OpenAI embeddings and every judge request) in one engine session. Details and price overrides (`ATTEST_JUDGE_PRICE_IN`, `ATTEST_JUDGE_PRICE_OUT`) in [Engine configuration](/sdk-guides/configuration/). | unset (no limit) | v1.0.0 |
-| `ATTEST_RATE_LIMIT_<PROVIDER>` | Judge requests per minute for `OPENAI`, `ANTHROPIC`, `GEMINI` or `ACP`; burst via `ATTEST_RATE_LIMIT_<PROVIDER>_BURST` | `60` | v1.0.0-rc.1 |
-
-## Judge Cache
-
-| Variable | Purpose | Default | Since |
-|----------|---------|---------|-------|
-| `ATTEST_JUDGE_CACHE_MAX_MB` | Maximum size in MB for the LLM judge response cache. Uses LRU eviction. Set to `0` to disable caching. | `100` | v0.5.1 |
-| `ATTEST_CACHE_DIR` | Directory for all Attest caches (judge, embeddings, engine binary) | `~/.attest/cache` | v0.4.0 |
-
-## History Store
-
-| Variable | Purpose | Default | Since |
-|----------|---------|---------|-------|
-| `ATTEST_HISTORY_MAX_ROWS` | Maximum number of rows in the SQLite history store. Oldest rows are deleted when the limit is exceeded. | `10000` | v0.5.1 |
-| `ATTEST_HISTORY_MAX_AGE_DAYS` | Auto-delete evaluation results older than this many days (enables pruning) | `30` when pruning is enabled | v0.5.1 |
-
-## Continuous Evaluation
-
-| Variable                       | Purpose                                                                                                                                                        | Default | Since  |
-| ------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- | ------ |
-| `ATTEST_CONTINUOUS_QUEUE_SIZE` | Maximum number of pending evaluations in the continuous eval queue. When full, new submissions block until space is available (backpressure).                  | `1000`  | v0.5.0 |
-| `ATTEST_SAMPLE_RATE`           | Sampling rate (`0.0`–`1.0`) for continuous evaluation. Also readable via `getSampleRate()` / `get_sample_rate()`. Programmatic `config({ sampleRate })` takes precedence. | `0`     | v0.6.0 |
-
-## LLM Providers
+## Runtime and Evaluation
 
 | Variable | Purpose | Default |
-|----------|---------|---------|
-| `OPENAI_API_KEY` | OpenAI API key for judge and embedding assertions | unset |
-| `ANTHROPIC_API_KEY` | Anthropic API key for judge assertions | unset |
-| `GOOGLE_API_KEY`, `GEMINI_API_KEY` | Google Gemini API key for judge assertions, in that order | unset |
-| `ATTEST_JUDGE_API_KEY` | Judge API key; overrides the provider's standard key and is required with `ATTEST_JUDGE_BASE_URL` | unset |
-| `ATTEST_JUDGE_BASE_URL` | Judge endpoint override, for example `http://localhost:11434/v1` for Ollama's OpenAI-compatible API | provider default |
+|---|---|---|
+| `ATTEST_ENGINE_TIMEOUT` | SDK wait for one engine reply, in **seconds in both SDKs** | `30` |
+| `ATTEST_SIMULATION` | `1`, `true`, or `yes`: evaluate deterministic checks, mark Layers 5–6 not evaluated | unset |
+| `ATTEST_EVAL_CONCURRENCY` | Layer 5–6 worker pool size per batch; positive integer | `8` |
+| `ATTEST_MAX_SOFT_FAILURES` | Maximum soft failures across batches in one engine session; `0` allows none | unset (unlimited) |
+| `ATTEST_STRICT` | `1`, `true`, or `yes` fails rather than skips not-evaluated tests; Python also accepts `--attest-strict` | unset |
 
-Native Ollama judges are not implemented. Point `ATTEST_JUDGE_BASE_URL` at Ollama's OpenAI-compatible endpoint.
+In 1.1.0, malformed/non-positive integer values for `ATTEST_EVAL_CONCURRENCY`, cache sizes, history limits and `ATTEST_JUDGE_TIMEOUT_S` are startup errors. TypeScript rejects `ATTEST_ENGINE_TIMEOUT` above 3600 with a message about seconds (older versions read milliseconds).
+
+On a response timeout the SDK restarts the engine and fails every pending request. Unobserved model spend is conservatively reserved, so the remainder of the session budget may be exhausted. See [Engine configuration](/sdk-guides/configuration/) for restart accounting.
 
 ## Judge Configuration
 
 | Variable | Purpose | Default |
-|----------|---------|---------|
-| `ATTEST_JUDGE_PROVIDER` | LLM provider for judge assertions: `openai`, `anthropic`, `gemini`, `acp` (local only) | `openai` |
-| `ATTEST_JUDGE_MODEL` | Model name for judge assertions | `gpt-4.1` |
+|---|---|---|
+| `ATTEST_JUDGE_PROVIDER` | `openai`, `anthropic`, `gemini`, or `acp` (local only); any other value is an error | `openai` |
+| `ATTEST_JUDGE_MODEL` | Judge model; required for Anthropic and Gemini; a recorded label for ACP | `gpt-4.1` for OpenAI; `acp:<command name>` for ACP |
+| `ATTEST_JUDGE_API_KEY` | Overrides the selected provider's standard key; required for a custom base URL | unset |
+| `OPENAI_API_KEY` | Standard OpenAI judge key and OpenAI embedding key | unset |
+| `ANTHROPIC_API_KEY` | Standard Anthropic judge key | unset |
+| `GOOGLE_API_KEY`, `GEMINI_API_KEY` | Standard Gemini judge keys, checked in this order | unset |
+| `ATTEST_JUDGE_BASE_URL` | Selected provider's API root; OpenAI-compatible endpoints include `/v1` | Provider's normal endpoint |
+| `ATTEST_JUDGE_TIMEOUT_S` | Positive per-evaluation timeout in seconds; also bounds ACP calls | `30` |
+| `ATTEST_JUDGE_META_EVAL` | Exact value `true`: run each judge assertion three times and take the median | unset |
+| `ATTEST_RATE_LIMIT_<PROVIDER>` | Positive judge requests/minute; suffix `OPENAI`, `ANTHROPIC`, `GEMINI`, or `ACP` | `60` |
+| `ATTEST_RATE_LIMIT_<PROVIDER>_BURST` | Positive request burst size | `10` |
+| `ATTEST_JUDGE_ACP_COMMAND` | ACP agent command, split on whitespace and run without a shell | unset |
 
-## Embedding Configuration
+Default API roots are `https://api.openai.com/v1`, `https://api.anthropic.com`, and `https://generativelanguage.googleapis.com`. A custom base URL must be HTTP(S) without credentials, query or fragment. For Anthropic/Gemini gateways omit the version path: the engine appends it. With a custom URL, **only `ATTEST_JUDGE_API_KEY` is sent**; standard provider keys are not forwarded. An unauthenticated local endpoint still needs a non-empty value, such as `unused`. Prefer HTTPS off loopback: plain HTTP sends the key in cleartext and produces a warning.
 
-| Variable | Purpose | Default |
-|----------|---------|---------|
-| `ATTEST_EMBEDDING_PROVIDER` | Embedding provider: `auto`, `openai`, `onnx` | `auto` |
-
-`auto` selects OpenAI when `OPENAI_API_KEY` is set, otherwise ONNX (free, local) in `onnx` builds.
-
-## Example `.env`
+Native Ollama judging is not implemented; select `openai` and use Ollama's OpenAI-compatible endpoint:
 
 ```bash
-# Engine
-ATTEST_ENGINE_TIMEOUT=30
-ATTEST_SIMULATION=0
-
-# Budget
-ATTEST_MAX_SOFT_FAILURES=5
-ATTEST_BUDGET_USD=1.00
-
-# Cache & history
-ATTEST_JUDGE_CACHE_MAX_MB=100
-ATTEST_HISTORY_MAX_ROWS=10000
-ATTEST_HISTORY_MAX_AGE_DAYS=30
-ATTEST_CONTINUOUS_QUEUE_SIZE=1000
-
-# Provider keys
-OPENAI_API_KEY=sk-...
-ATTEST_JUDGE_PROVIDER=openai
-ATTEST_JUDGE_MODEL=gpt-4.1
+ATTEST_JUDGE_PROVIDER=openai \
+ATTEST_JUDGE_BASE_URL=http://localhost:11434/v1 \
+ATTEST_JUDGE_API_KEY=unused \
+ATTEST_JUDGE_MODEL=llama3.1 \
+ATTEST_EMBEDDING_PROVIDER=onnx \
+uv run attest doctor
 ```
+
+This checks configuration; it does not prove the local model is running. `ATTEST_JUDGE_BASE_URL` affects only the judge: an exported `OPENAI_API_KEY` can still enable hosted OpenAI embeddings unless the embedding provider is explicitly local.
+
+ACP needs `ATTEST_JUDGE_ACP_COMMAND`, accepts neither judge API keys nor a base URL, and is refused if any of `CI`, `GITHUB_ACTIONS`, `GITLAB_CI`, `BUILDKITE`, `CIRCLECI`, `JENKINS_URL`, `TF_BUILD`, or `TEAMCITY_VERSION` is defined, even empty. It runs an unsandboxed local agent with an allowlisted environment: its own tools/configuration can act on untrusted trace content. Use `ATTEST_MAX_JUDGE_CALLS` to limit it; a USD budget cannot be enforced because ACP reports no token usage.
+
+In 1.1.0, abstentions, malformed judge replies and rejected credentials are `not_evaluated`, not passing scores. Only transient failures (network errors, HTTP 408/429/5xx) are retried, up to three retries. Default policy warns for `not_evaluated`; use `not_evaluated: block` in policy when CI must block it. Strict test mode and policy are separate controls. See [Judges](/sdk-guides/judges/).
+
+## Model-Call Budgets
+
+These limit **Attest-initiated** model calls, not arbitrary agent API calls. Unset/empty means unlimited; malformed or negative limits fail startup.
+
+| Variable | Purpose | Default |
+|---|---|---|
+| `ATTEST_MAX_JUDGE_CALLS` | Non-negative integer: maximum judge-provider requests per engine session, including retries, repeat runs, probes and simulated-user messages | unset |
+| `ATTEST_BUDGET_USD` | Finite non-negative USD limit for hosted embeddings and judge requests per engine session | unset |
+| `ATTEST_JUDGE_PRICE_IN` | Judge USD per 1M input tokens; set together with the output price | unset |
+| `ATTEST_JUDGE_PRICE_OUT` | Judge USD per 1M output tokens; set together with the input price | unset |
+
+Each call reserves a request and/or worst-case cost before it is sent. If it cannot reserve, it is not sent and the assertion is `not_evaluated: budget_exhausted`. Cost reconciles to reported usage after a successful reply; failures after sending retain their reservation because the provider may have billed them. A USD budget requires a known price: set both price overrides for a judge model outside the built-in price table. ACP with any USD budget fails startup. Per-assertion model overrides without a known price are refused at runtime.
+
+Limits apply per engine session, not globally. Under pytest-xdist, each worker has its own session; split a total budget among workers. These settings differ from `cost_under()` / `costUnder()` (assertions about recorded agent cost) and the test fixture's cumulative `budget` option.
+
+```bash
+ATTEST_MAX_JUDGE_CALLS=10 ATTEST_BUDGET_USD=1.00 uv run pytest
+```
+
+## Embeddings
+
+| Variable | Purpose | Default |
+|---|---|---|
+| `ATTEST_EMBEDDING_PROVIDER` | `auto`, `openai`, or `onnx`; unknown values fail startup | `auto` |
+| `ATTEST_ONNX_MODEL_DIR` | Directory for the SHA256-pinned all-MiniLM-L6-v2 model download | `~/.attest/models` |
+| `ATTEST_ONNX_RUNTIME_LIB` | Path to the ONNX Runtime 1.26 shared library; never auto-downloaded | unset |
+| `ATTEST_EMBEDDING_CACHE_MAX_MB` | Positive embedding-cache size in MB | `500` |
+
+`auto` chooses OpenAI when `OPENAI_API_KEY` is set, otherwise ONNX in an `onnx` build. An unavailable/unconfigured provider leaves embedding assertions not evaluated; it is not a semantic pass.
+
+## Cache, History and Reports
+
+| Variable | Purpose | Default |
+|---|---|---|
+| `ATTEST_CACHE_DIR` | Cache, baseline and history database directory (not engine binaries) | `~/.attest/cache` |
+| `ATTEST_JUDGE_CACHE_MAX_MB` | Positive judge-cache size; clamped to 10–10000 MB; `0` does **not** disable it | `100` |
+| `ATTEST_HISTORY_MAX_ROWS` | Positive history limit **per assertion ID**; setting either retention variable enables pruning | `10000` when pruning enabled |
+| `ATTEST_HISTORY_MAX_AGE_DAYS` | Positive age limit in days | `30` when pruning enabled |
+| `ATTEST_REPORT_TRACES` | `1` embeds evaluated traces in report-v2 files for `attest view`; traces can contain sensitive prompts/arguments | unset |
+| `ATTEST_CONTRACTS_DIR` | Engine contract-spec NDJSON output directory for `attest mutate --contracts`; contains no traces/outputs | unset |
+
+No automatic history pruning is enabled until a retention variable is set. Pruning runs in short background batches. History excludes not-evaluated rows; dynamic thresholds rebuild their per-assertion baseline after 1.1.0's assertion-ID change.
+
+## Continuous Evaluation and SDK Configuration
+
+| Variable | Purpose | Default |
+|---|---|---|
+| `ATTEST_CONTINUOUS_QUEUE_SIZE` | Maximum queued evaluations; a full queue applies backpressure | `1000` |
+| `ATTEST_SAMPLE_RATE` | Sampling fraction from `0.0` to `1.0`, read by `get_sample_rate()` / `getSampleRate()` | `0` |
+| `ATTEST_ALERT_WEBHOOK` | Continuous-evaluation alert webhook URL | unset |
+| `ATTEST_ALERT_SLACK_URL` | Continuous-evaluation Slack webhook URL | unset |
+
+Python exposes `config(simulation=..., sample_rate=..., alert_webhook=..., alert_slack_url=...)`; TypeScript exposes `config({ simulation, sampleRate })`. A nonzero configured sample rate takes precedence over the environment. Alert URL configuration through `config()` is Python-only; configured URLs take precedence over their environment variables. See [Continuous Evaluation](/guides/continuous-eval/).
+
+## Egress Guard
+
+`ATTEST_EGRESS=block` screens connections from the test process to known model-provider hosts; `allow` or unset leaves them alone. Other values are errors. Python also accepts `--attest-egress=block`; TypeScript replay accepts `{ egress: 'block' }`.
+
+With the guard enabled, `HTTP_PROXY`, `HTTPS_PROXY`, and `ALL_PROXY` (either case) identify HTTP proxies whose `CONNECT` targets and absolute-form request destinations are screened. `NO_PROXY` is not read. This is a best-effort trusted-test guard, **not a sandbox**: subprocesses, SOCKS proxies, HTTPS-encrypted proxy connections and traffic inside an allowed tunnel are not inspected. See [Replay](/sdk-guides/replay/).
+
+## Removed Variables
+
+These names are no longer read; setting them has no effect.
+
+| Removed | Replacement |
+|---|---|
+| `ATTEST_OPENAI_API_KEY` | `ATTEST_JUDGE_API_KEY` for judges, or `OPENAI_API_KEY` for OpenAI judges/embeddings |
+| `ATTEST_BUDGET_MAX_COST` | `ATTEST_MAX_SOFT_FAILURES`; the old variable counted failures, not USD |
+| `ATTEST_JUDGE_RPM`, `ATTEST_JUDGE_BURST` | `ATTEST_RATE_LIMIT_OPENAI`, `ATTEST_RATE_LIMIT_OPENAI_BURST` |

@@ -1,273 +1,111 @@
 ---
 title: "System Architecture"
-description: "High-level architecture of the Attest framework — SDK, engine, assertion pipeline, and adapter system."
+description: "Attest 1.1.0 trace capture, SDKs, local engine, and assertion evaluation."
 ---
 
-Attest is a testing framework for AI agents built on a three-layer architecture: language-specific SDKs capture agent execution as traces, a Go engine evaluates assertions against those traces, and adapters bridge the gap between LLM providers or agent frameworks and the canonical trace format.
+Attest tests what an AI agent did and what it left behind. An SDK captures execution as a trace, adapters translate provider or framework data, and a local Go engine evaluates the assertions you explicitly request.
 
-## Architecture Diagram
+## Components
 
-```mermaid
-flowchart TB
-    subgraph SDKs["Language SDKs"]
-        direction LR
-        PY["Python SDK<br/><code>attest-ai</code>"]
-        TS["TypeScript SDK<br/><code>@attest-ai/core</code>"]
-    end
+| Component | Responsibility |
+|---|---|
+| Python SDK (`attest-ai`) | Trace construction, `expect()` chains, adapters, engine lifecycle, pytest integration |
+| TypeScript SDK (`@attest-ai/core`) | Trace construction, fluent assertions, adapters, engine lifecycle |
+| TypeScript test integration (`@attest-ai/vitest`) | Vitest fixtures and test-outcome enforcement |
+| Go engine (`attest-engine`) | Deterministic and model-based assertion evaluation over JSON-RPC |
+| SDK plugins | Custom evaluation logic run outside the engine |
 
-    subgraph Adapters["Trace Capture Adapters"]
-        direction LR
-        subgraph Providers["Provider Adapters"]
-            OAI[OpenAI]
-            ANT[Anthropic]
-            GEM[Gemini]
-            OLL[Ollama]
-        end
-        subgraph Frameworks["Framework Adapters"]
-            LC[LangChain]
-            LI[LlamaIndex]
-            ADK[Google ADK]
-            CR[CrewAI]
-        end
-        subgraph Special["Special"]
-            MAN[Manual]
-            OTEL[OTel]
-        end
-    end
+These components ship as **1.1.0**. Python requires 3.10 or newer. Both SDKs use the same engine protocol, but their adapter inventories differ; do not assume every Python integration is available in TypeScript.
 
-    subgraph Engine["Go Engine (subprocess)"]
-        direction TB
-        INIT["initialize"]
-        EVAL["evaluate_batch"]
-        PIPE["Assertion Pipeline"]
-        SHUT["shutdown"]
-        INIT --> EVAL --> PIPE --> SHUT
-    end
-
-    subgraph Pipeline["Assertion Layers"]
-        direction LR
-        L1["L1 Schema"]
-        L2["L2 Constraint"]
-        L3["L3 Trace and behavior"]
-        L4["L4 Content"]
-        L5["L5 Embedding"]
-        L6["L6 Judge"]
-        PLUG["Plugins"]
-    end
-
-    Adapters --> SDKs
-    SDKs -->|"JSON-RPC 2.0<br/>NDJSON / stdio"| Engine
-    Engine --> Pipeline
-```
-
-## Design Principles
-
-Seven principles govern the framework's design and API surface.
-
-### 1. Test Outcomes, Not Paths
-
-Agents are non-deterministic. The same input can produce different tool call sequences that are all correct. Attest asserts on **what was achieved and what constraints were respected**, not on the specific execution path.
+## A small test
 
 ```python
-# Asserts that both tools were called and that eligibility
-# was checked before processing — regardless of other ordering
-expect(result).required_tools(["lookup_order", "check_eligibility"])
-expect(result).tools_called_in_order(["check_eligibility", "process_refund"])
-```
+from attest import expect
 
-### 2. Cheapest Valid Assertion First
-
-The pipeline is ordered by cost. Layers 1-4 are free and deterministic. Layers 5 and 6 depend on the embedding and judge provider; a local ONNX embedding model and a local judge endpoint cost nothing. The API is designed so developers naturally reach for cheaper layers first.
-
-Much of an agent's testable surface is deterministic — tool call schemas, guardrail enforcement, structured output validation, state machine transitions, cost budgets. LLM-as-judge is the last resort, not the default.
-
-### 3. Soft Failures Are First-Class
-
-LLM-based assertions produce scores, not booleans. Attest introduces soft failures:
-
-| Score Range | Classification | CI Behavior |
-|---|---|---|
-| `< 0.5` | Hard fail | Block merge |
-| `0.5 - 0.8` | Soft fail | Warn, allow merge if within budget |
-| `> 0.8` | Pass | Continue |
-
-Soft failure budgets are configurable per test suite and per CI pipeline.
-
-### 4. Code-First, Not Config-First
-
-Tests are written in code (Python or TypeScript), not YAML or UI dashboards. The test file is the source of truth — version-controlled, reviewed in PRs, run in CI.
-
-```python
-def test_processes_eligible_refund(attest, result):
-    chain = (
+def test_refund_contract(attest, result):
+    attest.evaluate(
         expect(result)
-        .output_matches_schema(refund_schema)
-        .required_tools(["process_refund"])
-        .output_contains("ORD-123456")
-        .cost_under(0.10)
+        .required_tools(["lookup_order"])
+        .output_contains("refund")
+        .cost_under(0.05)
     )
-    attest.evaluate(chain)
 ```
 
-### 5. Simulation Is Built-In
+The `result` is your captured agent result. `expect()` builds a chain; `attest.evaluate()` sends it to the engine and enforces the outcome. Leaving a chain unevaluated fails the test in 1.1.0, including assertions appended after evaluation.
 
-Set `ATTEST_SIMULATION=1` to run tests without real LLM API calls. Layers 1-4 and 7 still evaluate for real; Layers 5 and 6 return `not_evaluated`, so no provider credentials are needed for rapid iteration and CI pipeline validation.
+## Design principles
 
-### 6. Framework-Agnostic
+### Test outcomes and constraints
 
-The integration surface is the **trace**. Any system that can produce a trace in Attest's canonical format is testable. Adapters handle the translation from provider-specific or framework-specific events into the canonical `Trace` structure.
+An agent can take different valid paths. Assert required outcomes, allowed tools, schemas, and budgets rather than making every test depend on an exact sequence. Use order assertions when the sequence itself is a business rule, such as checking eligibility before a refund.
 
-### 7. Cost Is a Test Metric
+### Deterministic checks first
 
-Every test run tracks token consumption, API costs, and latency. Cost assertions sit alongside correctness assertions:
+Layers 1–4 check schemas, numeric constraints, trace behavior, and content without calling a model. Layer 3 includes trace trees and final world-state effects. Layer 5 uses embeddings; Layer 6 uses a judge. Their cost depends on the provider: local ONNX embeddings avoid embedding API charges, while hosted models can incur charges.
 
-```python
-expect(result).cost_under(0.05)
-expect(result).tokens_under(3000)
-```
+The engine runs deterministic assertions before L5/L6 and short-circuits those model-based assertions after any deterministic hard failure. It does not invent new assertions or automatically choose a judge when a deterministic check passes. The model is six evaluated layers plus plugins.
 
-## Component Overview
+See [Assertion Pipeline](/architecture/assertion-pipeline/) for the full layer and scheduling model.
 
-### Language SDKs
+### Missing verdicts are not passes
 
-| SDK | Package | Runtime | Status |
-|---|---|---|---|
-| Python | `attest-ai` (PyPI) | Python 3.10+ | 1.1.0 |
-| TypeScript | `@attest-ai/core` (npm) | Node 18+ | 1.1.0 |
+Results distinguish `pass`, `soft_fail`, `hard_fail`, and `not_evaluated`. Embedding and judge checks ordinarily pass at their configured threshold and otherwise hard-fail, or soft-fail when explicitly configured as soft. There is no universal 0.5/0.8 score band that decides merge permission.
 
-Both SDKs provide the same core API surface: `expect()` fluent DSL, `TraceBuilder`, `TraceTree`, adapter base classes, tier system, and engine lifecycle management via `EngineManager`.
+Malformed judge replies, abstentions, unavailable providers, and exhausted call budgets produce explicit missing-verdict reasons. Default policy warns on `not_evaluated`; configure `not_evaluated: block` if CI must require a verdict. Soft-failure budgets and CI policy are separate from numerical scores.
 
-### Go Engine
+### Code-first contracts
 
-A statically-compiled Go binary (`attest-engine`) that runs as a subprocess. The SDK communicates with it over **JSON-RPC 2.0** transported as **NDJSON over stdin/stdout**.
+Python and TypeScript tests build assertions directly in code. Trace capture and assertion evaluation are separate: recording an event does not assert anything about it. Pytest and Vitest enforce evaluated chains and report missing verdicts rather than silently treating them as successful checks.
 
-The engine handles all assertion evaluation — from JSON Schema validation (Layer 1) through LLM-as-judge scoring (Layer 6). This architecture separates the hot evaluation path (Go) from the developer-facing API (Python/TypeScript).
+### Simulation still checks evidence
 
-Binary discovery chain:
-1. `ATTEST_ENGINE_PATH` environment variable
-2. `PATH` lookup
-3. `~/.attest/bin/` shared cache (version-checked)
-4. Monorepo dev layout
-5. Local `./bin/`
-6. Auto-download from GitHub Releases
+`ATTEST_SIMULATION=1` runs the real engine and deterministic checks. Embedding/judge assertions return `not_evaluated(simulation)` unless an earlier hard failure short-circuited them. This mode does not fabricate passes, bypass the engine, or stop application code from making provider calls.
 
-### Assertion Pipeline
+### Measure cost without confusing budgets
 
-Six layers evaluated in order, cheapest first, plus plugins. Layers 1-4 are free and deterministic. Layer 5 uses embeddings and layer 6 an LLM judge; their cost depends on the provider. Plugins run custom logic in the SDK process. The generated layer table is on the [overview](/overview/).
+Agent token use, cost, and latency can be recorded in trace metadata and checked alongside correctness. An absent measurement is not a measured zero. The cost of Attest's own model-based evaluation is separate: batch `usage` tracks its calls, tokens, priced spend, retries, and budget refusals. Use this ledger rather than assuming assertion `cost` captures every billed call.
 
-See [Assertion Pipeline](/architecture/assertion-pipeline/) for the full deep dive.
+## Trace data model
 
-### Adapter System
+A trace contains `trace_id`, `schema_version`, `agent_id`, `input`, `steps`, `output`, `metadata`, and optional parent linkage. Each step has a type, name, arguments, result, and optional timing/agent information. An `agent_call` can contain a nested `sub_trace`.
 
-Two tiers of adapters capture traces from different integration points:
+| Step type | Meaning |
+|---|---|
+| `llm_call` | Provider/model interaction |
+| `tool_call` | Recorded tool interaction |
+| `retrieval` | Retrieval operation |
+| `agent_call` | Delegation, optionally with a nested trace |
 
-- **Provider adapters** (OpenAI, Anthropic, Gemini, Ollama) wrap LLM client SDKs to capture individual API calls, token counts, and tool use.
-- **Framework adapters** (LangChain, LlamaIndex, Google ADK, CrewAI) hook into agent orchestration frameworks to capture tool call sequences, agent delegation trees, and multi-step reasoning.
+Optional `started_at_ms` and `ended_at_ms` timestamps support order and overlap checks. `agent_id` and `agent_role` support agent-specific checks. Evidence availability depends on the adapter and source events; not every integration captures a full delegation tree or real request timings.
 
-See [Adapter System](/architecture/adapter-system/) for the full architecture.
+World-effect assertions use a separate world-v1 snapshot embedded in the assertion spec. This lets tests check stored refunds or notifications, not merely whether a tool was requested. Relational `sum` bounds amounts by a related record; `matches` checks fields across records joined by a business key.
 
-## Trace Data Model
+## Adapter system
 
-The `Trace` is the central data structure. Every agent interaction produces a trace containing input, execution steps, output, and metadata.
+Provider adapters translate completed OpenAI, Anthropic, Gemini, or Ollama responses. Framework adapters consume callbacks, events, or summaries. Manual capture and OpenTelemetry conversion cover other instrumentation paths.
 
-```mermaid
-classDiagram
-    class Trace {
-        +str trace_id
-        +int schema_version
-        +str agent_id
-        +dict input
-        +list~Step~ steps
-        +dict output
-        +TraceMetadata metadata
-        +str parent_trace_id
-    }
+The released capability inventory lists 10 Python and 7 TypeScript adapters. OpenAI, Anthropic, and Manual are stable; other integrations are beta or experimental. CrewAI capture is summary-only, not a full tool/delegation trace. See [Adapter System](/architecture/adapter-system/) for the inventory, maturity commitments, and evidence boundaries.
 
-    class Step {
-        +str type
-        +str name
-        +dict args
-        +dict result
-        +Trace sub_trace
-        +dict metadata
-        +int started_at_ms
-        +int ended_at_ms
-        +str agent_id
-        +str agent_role
-    }
+## Engine lifecycle and discovery
 
-    class TraceMetadata {
-        +int total_tokens
-        +float cost_usd
-        +int latency_ms
-        +str model
-        +str timestamp
-    }
+The SDK starts the engine as a subprocess and exchanges JSON-RPC 2.0 messages as NDJSON over stdin/stdout. The handshake reports the version, runtime capabilities, and limits. SDK releases require their matching `ENGINE_VERSION`, with version-specific binaries cached under `~/.attest/bin/<ENGINE_VERSION>/`.
 
-    Trace "1" --> "*" Step : steps
-    Trace "1" --> "0..1" TraceMetadata : metadata
-    Step "0..1" --> "0..1" Trace : sub_trace
-```
+Python discovery checks an explicit engine path, `ATTEST_ENGINE_PATH`, `PATH`, and the versioned cache before downloading the release binary when allowed. It does not implicitly search a monorepo or local `./bin/`; use `ATTEST_ENGINE_PATH` for a development build. A binary with the wrong version is rejected rather than silently used.
 
-### Step Types
+See [Engine Protocol](/architecture/engine-protocol/) for the lifecycle and [JSON-RPC reference](/reference/engine/json-rpc-protocol/) for wire fields.
 
-| Type | Constant | Description |
+## Cost tiers
+
+Cost tiers schedule tests; they do not describe adapter maturity:
+
+| Tier | Layers | Cost |
 |---|---|---|
-| LLM Call | `llm_call` | A call to an LLM provider API |
-| Tool Call | `tool_call` | Execution of a tool/function |
-| Retrieval | `retrieval` | Document or vector search operation |
-| Agent Call | `agent_call` | Delegation to a sub-agent (contains `sub_trace`) |
-
-### Temporal Fields
-
-Steps carry optional temporal metadata for multi-agent analysis:
-
-- `started_at_ms` / `ended_at_ms` — wall-clock timestamps for ordering and overlap detection
-- `agent_id` / `agent_role` — stable identifiers for agent-level assertions
-
-Provider adapters populate timestamps from wall-clock around LLM calls. Framework adapters populate timestamps and agent identity from framework event metadata.
-
-## Tier System
-
-Tests are tagged with tiers that map to assertion cost:
-
-| Tier | Layers | Cost | Use Case |
-|---|---|---|---|
-| `TIER_1` | L1-L4 | Free | Schema, constraint, trace and behavior, content |
-| `TIER_2` | L5 | ~$0.001/assertion | Embedding similarity |
-| `TIER_3` | L6 | ~$0.01+/assertion | LLM-as-judge scoring |
-
-```python
-from attest import TIER_1, TIER_3, expect, tier
-
-@tier(TIER_1)
-def test_schema_compliance(attest, result):
-    attest.evaluate(expect(result).output_matches_schema(schema))
-
-@tier(TIER_3)
-def test_response_empathy(attest, result):
-    attest.evaluate(expect(result).passes_judge("The response shows empathy", threshold=0.7))
-```
-
-Run only free tests in development, escalate to full suite in CI:
+| `TIER_1` | L1–L4, including effects and trace trees | No model API calls for evaluation |
+| `TIER_2` | L5 | Embedding-provider dependent |
+| `TIER_3` | L6 | Judge-provider dependent |
 
 ```bash
-# Development: fast, free tests only
-pytest -m attest --attest-tier=1
-
-# CI pipeline: full suite including LLM judge
-pytest -m attest
+uv run pytest -m attest --attest-tier=1
 ```
 
-## Multi-SDK Strategy
-
-Both SDKs share the same engine binary and protocol. The engine is language-agnostic — any client that speaks JSON-RPC 2.0 over NDJSON/stdio can drive it.
-
-```mermaid
-flowchart LR
-    PY["Python SDK"] -->|"JSON-RPC 2.0"| ENG["Go Engine<br/>v1.0.0"]
-    TS["TypeScript SDK"] -->|"JSON-RPC 2.0"| ENG
-    FUTURE["Future SDKs<br/>(Go, Rust, ...)"] -.->|"JSON-RPC 2.0"| ENG
-```
-
-Each SDK release requires one engine version, `ENGINE_VERSION`, equal to the SDK's own (SDK 1.0.0 requires engine 1.0.0). The engine binary is cached in `~/.attest/bin/<ENGINE_VERSION>/`, and the SDK stops with a version-mismatch error when the engine it finds reports a different version.
+A tier-1 evaluation is provider-free, but the agent under test may still call a provider. Use recorded or scripted application behavior when the entire test must avoid live model calls.

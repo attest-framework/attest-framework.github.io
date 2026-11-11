@@ -3,26 +3,26 @@ title: "Python Adapters"
 description: "Integrations with LLM providers, frameworks, and observability platforms."
 ---
 
-Integrations with LLM providers, frameworks, and observability platforms.
+Adapters turn provider responses, framework runs, or telemetry into traces you can test. Choose the adapter for the data you already have; a trace only supports assertions about evidence it actually captures.
 
 ## Overview
 
-Adapters convert provider responses, framework runs, and telemetry spans into Attest `Trace` objects. Attest ships the adapters below, all importable from `attest` (provider SDKs are optional extras). Maturity per adapter is in the generated adapter table on the [overview](/overview/). Build an `AgentResult` from the trace and evaluate it with the `attest` fixture.
+Attest 1.1.0 ships these ten Python adapters, all importable from `attest`. Provider and framework dependencies are optional extras. Maturity tiers below match the release capability inventory.
 
-| Adapter | Extra | Capture method |
-|---------|-------|----------------|
-| `OpenAIAdapter` | `openai` | `trace_from_response(response, input_messages=...)` |
-| `AnthropicAdapter` | `anthropic` | `trace_from_response(response, input_messages=...)` |
-| `GeminiAdapter` | `gemini` | `trace_from_response(response, input_messages=...)` |
-| `OllamaAdapter` | `ollama` | `trace_from_response(response, input_messages=...)` |
-| `LangChainAdapter` | `langchain` | `with adapter.capture() as handler`, then `adapter.trace` |
-| `CrewAIAdapter` | `crewai` | `with adapter.capture()`, then `trace_from_crew_output(output, crew)` |
-| `LlamaIndexInstrumentationHandler` | `llamaindex` | `with handler:`, then `build_trace(...)` |
-| `GoogleADKAdapter` | `google-adk` | `await adapter.capture_async(...)` or `from_events(events, ...)` |
-| `OTelAdapter` | `otel` | `OTelAdapter.from_spans(spans)` or `from_otel_span_dicts(dicts)` |
-| `ManualAdapter` | none | `capture(builder_fn)` or `create_builder()` |
+| Adapter | Extra | Maturity | Capture method |
+|---------|-------|----------|----------------|
+| `OpenAIAdapter` | `openai` | Stable | `trace_from_response(response, input_messages=...)` |
+| `AnthropicAdapter` | `anthropic` | Stable | `trace_from_response(response, input_messages=...)` |
+| `ManualAdapter` | none | Stable | `capture(builder_fn)` or `create_builder()` |
+| `GeminiAdapter` | `gemini` | Beta | `trace_from_response(response, input_messages=...)` |
+| `OllamaAdapter` | `ollama` | Beta | `trace_from_response(response, input_messages=...)` |
+| `LangChainAdapter` | `langchain` | Beta | `with adapter.capture() as handler`, then `adapter.trace` |
+| `CrewAIAdapter` | `crewai` | Beta | `with adapter.capture()`, then `trace_from_crew_output(output, crew)`; summary only |
+| `OTelAdapter` | `otel` | Beta | `OTelAdapter.from_spans(spans)` or `from_otel_span_dicts(dicts)` |
+| `GoogleADKAdapter` | `google-adk` | Experimental | `await adapter.capture_async(...)` or `from_events(events, ...)` |
+| `LlamaIndexInstrumentationHandler` | `llamaindex` | Experimental | `with handler:`, then `build_trace(...)` |
 
-Install an extra with `uv add "attest-ai[<extra>]>=1.0.0"`.
+For example, install OpenAI support with `uv add "attest-ai[openai]>=1.1.0"`. To run the pytest examples, also install `pytest` with `uv add pytest`, save tests in a `test_*.py` module, and run `uv run pytest`. Framework snippets assume you have already configured the framework objects they use.
 
 ## LLM Providers
 
@@ -38,11 +38,11 @@ adapter.trace_from_response(
 ) -> Trace
 ```
 
-`metadata` accepts `cost_usd`, `latency_ms`, and `model`; these populate the trace metadata that `cost_under` and `latency_under` assert against. Each adapter takes an optional `agent_id`.
+Pass `cost_usd` and `latency_ms` as metadata for cost and latency assertions. If both caller timestamps are supplied, their difference supplies latency unless `latency_ms` is explicit. Model extraction is adapter-specific: a `model` keyword is not a universal override. Each adapter takes an optional `agent_id`. Provider adapters convert responses; your provider client makes the API call. The live-provider examples below require its credentials and may incur provider charges.
 
 ### OpenAI
 
-Capture an OpenAI `ChatCompletion` response.
+Capture an OpenAI Chat Completions or Responses API object. Both use the same `trace_from_response()` method; the example below uses Chat Completions. Refusals are preserved in the LLM step and used as the visible message when no completion text is present. OpenAI output also includes `structured`, populated from the optional `structured_output` metadata dictionary.
 
 ```python
 from openai import OpenAI
@@ -150,7 +150,7 @@ The handler records chain, chat model, LLM, and tool events (`on_chain_start`, `
 
 ### CrewAI
 
-`CrewAIAdapter.capture()` yields the adapter. Call `trace_from_crew_output(crew_output, crew)` after `kickoff()`; each crew agent becomes an `agent_call` step.
+`CrewAIAdapter.capture()` yields the adapter. Call `trace_from_crew_output(crew_output, crew)` after `kickoff()` to capture final output, total tokens, and elapsed latency. This adapter produces **no steps**: configured crew agents and tasks are not proof that an agent or tool executed. Use output and metadata assertions, not `agent_called` or tool assertions.
 
 ```python
 from attest import AgentResult, CrewAIAdapter, expect
@@ -161,7 +161,7 @@ with adapter.capture() as cap:
     output = crew.kickoff()
 trace = cap.trace_from_crew_output(output, crew)
 
-attest.evaluate(expect(AgentResult(trace=trace)).agent_called("Research"))
+attest.evaluate(expect(AgentResult(trace=trace)).output_contains("..."))
 ```
 
 ### LlamaIndex
@@ -199,7 +199,7 @@ trace = GoogleADKAdapter.from_events(events, agent_id="root-agent", input_messag
 
 ### OpenTelemetry
 
-`OTelAdapter` converts OpenTelemetry spans that carry `gen_ai.*` attributes into an Attest trace. Both constructors are class methods.
+`OTelAdapter` converts OpenTelemetry spans that carry `gen_ai.*` attributes into an Attest trace using the matching engine's OTLP conversion. These constructors are class methods; span inputs must belong to one trace. Conversion errors propagate rather than producing an empty trace.
 
 ```python
 from attest import OTelAdapter
@@ -209,6 +209,9 @@ trace = OTelAdapter.from_spans(spans, agent_id="traced-agent")
 
 # From OTLP/JSON-shaped span dicts
 trace = OTelAdapter.from_otel_span_dicts(span_dicts, agent_id="traced-agent")
+
+# From a full OTLP/JSON export (a mapping, JSON string, bytes, or pathlib.Path)
+trace = OTelAdapter.from_otlp(otlp_export, agent_id="traced-agent")
 ```
 
 `attest.adapters.otel.to_otel_spans(trace)` performs the inverse and returns OTLP-compatible span dicts.
@@ -231,35 +234,16 @@ trace = adapter.capture(
 
 ## Custom Adapters
 
-Provider-style adapters inherit `BaseProviderAdapter` and override the extraction methods. Framework-style adapters inherit `BaseAdapter` and implement their own capture flow.
-
-```python
-from typing import Any
-
-from attest.adapters import BaseProviderAdapter
+Provider-style adapters inherit `BaseProviderAdapter` and override the extraction methods. Framework-style adapters inherit `BaseAdapter` and implement their own capture flow. The tutorial linked below includes a complete dictionary-based adapter and tests without a provider dependency.
 
 
-class MistralAdapter(BaseProviderAdapter):
-    def _extract_completion(self, response: Any) -> str:
-        return response.choices[0].message.content or ""
-
-    def _extract_model(self, response: Any, **metadata: Any) -> str | None:
-        return getattr(response, "model", None)
-
-    def _extract_total_tokens(self, response: Any) -> int | None:
-        return response.usage.total_tokens if response.usage else None
-
-    def _extract_tool_calls(self, response: Any) -> list[dict[str, Any]]:
-        return []
-```
-
-Required overrides: `_extract_completion`, `_extract_model`, `_extract_total_tokens`, `_extract_tool_calls`. Optional overrides: `_extract_input`, `_build_output`. `BaseAdapter` provides `_create_builder()`, `_now_ms()`, and `_resolve_timestamps()`.
+Required overrides: `_extract_completion`, `_extract_model`, `_extract_total_tokens`, `_extract_tool_calls`. Optional overrides: `_extract_input`, `_build_output`, `_extract_token_split`, and `_extract_refusal`. `BaseAdapter` provides `_create_builder()`, `_now_ms()`, and `_resolve_timestamps()`. Provider tool-call steps record requested names and arguments, not tool execution results.
 
 See the [Writing a Framework Adapter](/tutorials/writing-adapter/) tutorial for a complete guide.
 
 ## Configuration
 
-Runtime behavior is set with `attest.config` or environment variables:
+SDK configuration is separate from adapter construction. For example, simulation changes evaluation behavior; it does not prevent the provider calls in the live examples above:
 
 ```python
 from attest import config
@@ -274,7 +258,7 @@ config(simulation=True, sample_rate=0.5)
 | `alert_webhook` | `ATTEST_ALERT_WEBHOOK` |
 | `alert_slack_url` | `ATTEST_ALERT_SLACK_URL` |
 
-Adapters do not make provider calls themselves; credentials such as `OPENAI_API_KEY` and `ANTHROPIC_API_KEY` are read by your provider client.
+Provider adapters do not make provider calls themselves; credentials such as `OPENAI_API_KEY` and `ANTHROPIC_API_KEY` are read by your provider client. `GoogleADKAdapter.capture_async()` is different: it runs the supplied ADK runner. Sampling and alert settings apply to continuous evaluation, not to capture by these adapters.
 
 ## Related
 
