@@ -1,6 +1,6 @@
 ---
 title: "Quickstart"
-description: "Get up and running with Attest in 5 minutes. Install the SDK and write your first agent test."
+description: "Install Attest 1.1.0 and check an agent's reply and tool calls without a model API."
 ---
 
 import { Code } from "@astrojs/starlight/components";
@@ -10,27 +10,27 @@ import testAgentPy from "../../../examples/quickstart/test_agent.py?raw";
 import agentTs from "../../../examples/quickstart-ts/agent.ts?raw";
 import agentTestTs from "../../../examples/quickstart-ts/agent.test.ts?raw";
 
-Get up and running with Attest in 5 minutes. The code on this page is the [`quickstart`](https://github.com/attest-framework/attest-examples/tree/main/quickstart) and [`quickstart-ts`](https://github.com/attest-framework/attest-examples/tree/main/quickstart-ts) examples from attest-examples, which CI runs on every change.
+Attest 1.1.0 checks what your agent says and does inside pytest or Vitest. These examples record sample data without calling a model. The code is imported from the [`quickstart`](https://github.com/attest-framework/attest-examples/tree/main/quickstart) and [`quickstart-ts`](https://github.com/attest-framework/attest-examples/tree/main/quickstart-ts) examples, which CI runs on every change.
 
 ## Installation
 
 ### Python
 
 ```bash
-uv add "attest-ai>=1.0.0" pytest
+uv add "attest-ai>=1.1.0" pytest
 ```
 
 ### TypeScript
 
 ```bash
-npm install -D "@attest-ai/core@>=1.0.0" "@attest-ai/vitest@>=1.0.0" "vitest@^4"
+npm install -D "@attest-ai/core@>=1.1.0" "@attest-ai/vitest@>=1.1.0" "vitest@^4"
 ```
 
 ## Write Your First Test
 
 ### Step 1: Create an Agent
 
-The example agent handles a refund request: one LLM call, then the `lookup_order` and `process_refund` tools. The `agent` decorator records each step on a `TraceBuilder`, so the test can assert on the trace without calling a model.
+The example records a refund request: one sample LLM call, then `lookup_order` and `process_refund` tool calls. The `agent` decorator supplies a `TraceBuilder`; the example explicitly records the steps so the test can assert on the trace without calling a model. Its cost metadata and budget thresholds are illustrative, not provider price claims.
 
 #### Python
 
@@ -64,7 +64,10 @@ uv run pytest -v
 
 #### TypeScript
 
+Warm up the engine before the first Vitest run: on a cold machine its initial download can exceed the default five-second test timeout.
+
 ```bash
+npx attest doctor
 npx vitest run
 ```
 
@@ -85,7 +88,7 @@ Attest uses a fluent API where you chain assertions. Each assertion validates a 
 | Trace Tree | `.agent_called("billing")` | `.agentCalled("billing")` | Multi-agent structure |
 | Plugin | `.plugin("my-plugin", {...})` | `.plugin("my-plugin", {...})` | Custom checks |
 
-Layers 1–4 and the trace tree are deterministic and free. Embedding and judge assertions call a provider; under `ATTEST_SIMULATION=1` they return `not_evaluated(simulation)` instead.
+Layers 1–4, including trace-tree and effect checks in layer 3, are deterministic and free. Embedding and judge assertions use a configured provider whose cost varies; under `ATTEST_SIMULATION=1` they return `not_evaluated(simulation)` instead. Simulation does not intercept your application's own network calls.
 
 ## Next Steps
 
@@ -127,11 +130,7 @@ def test_explains_recursion(attest):
 
 **"API key not found"**
 
-Embedding and judge assertions need a provider key. Set it as an environment variable:
-
-```bash
-export OPENAI_API_KEY="sk-..."
-```
+Hosted embedding and judge providers need their own configuration and credentials. Local ONNX embeddings do not use a provider key; local ACP judges use the agent's login and are refused in CI. See [configuration](/sdk-guides/configuration/) and [judges](/sdk-guides/judges/) rather than adding keys to test files.
 
 **"Assertion failed but I expected it to pass"**
 
@@ -145,7 +144,7 @@ print(result.trace.metadata)  # Tokens, cost and latency
 
 **"Tests call a paid model"**
 
-Run with `ATTEST_SIMULATION=1`: deterministic layers still evaluate, and embedding and judge assertions report `not_evaluated(simulation)` without a provider call.
+`ATTEST_SIMULATION=1` prevents Attest's embedding and judge provider calls; those assertions report `not_evaluated(simulation)`. Your application's own model calls still run unless you replace them with mocks or [strict replay](/sdk-guides/replay/).
 
 ## Learn More
 

@@ -1,391 +1,53 @@
 ---
 title: "Migrating from Manual Testing"
-description: "Automate agent QA with Attest's assertion framework."
+description: "Turn a concrete review checklist into repeatable agent tests."
 ---
 
-Automate agent QA with Attest's assertion framework.
+Keep human review for judgment calls, and automate the checks you can state precisely. Attest 1.1.0 lets you test a reply, a tool sequence and an external effect inside pytest or Vitest. Passing tests cover the rules you wrote, not every possible defect.
 
-## Why Automate?
+## Start with one checklist item
 
-Manual QA is slow and error-prone. Attest lets you encode QA checklists as executable tests:
-
-- **Repeatability** — Run the same checks instantly
-- **Regression detection** — Catch changes after model updates
-- **CI/CD integration** — Fail builds if quality drops
-- **Historical tracking** — See quality trends over time
-- **Cost visibility** — Monitor token usage and latency
-
-## Common Manual Checks to Attest Assertions
-
-### Check 1: Output Contains Specific Text
-
-#### Manual QA Checklist
-
-```
-[ ] Response mentions the answer
-[ ] Response doesn't mention errors
-[ ] Response is not empty
-```
-
-#### Attest Assertions
-
-```python
-from attest import expect
-
-def test_answer_text(attest):
-    result = agent.run("question")
-
-    chain = (
-        expect(result)
-        .output_contains("answer")
-        .output_not_contains("error")
-        .output_matches_regex(r"\S")  # not empty
-    )
-    attest.evaluate(chain)
-```
-
-### Check 2: Response Structure
-
-#### Manual QA Checklist
-
-```
-[ ] Response is valid JSON
-[ ] Contains required fields (name, email)
-[ ] No null values in important fields
-```
-
-#### Attest Assertions
-
-```python
-from attest import expect
-
-def test_user_structure(attest):
-    result = agent.run("Generate user")
-
-    chain = expect(result).output_matches_schema({
-        "type": "object",
-        "properties": {
-            "name": {"type": "string"},
-            "email": {"type": "string"}
-        },
-        "required": ["name", "email"]
-    })
-    attest.evaluate(chain)
-```
-
-### Check 3: Performance Metrics
-
-#### Manual QA Checklist
-
-```
-[ ] Response completes in under 5 seconds
-[ ] API costs less than $0.10
-```
-
-#### Attest Assertions
-
-```python
-from attest import expect
-
-def test_performance_limits(attest):
-    result = agent.run("question")
-
-    chain = expect(result).latency_under(5000).cost_under(0.10)
-    attest.evaluate(chain)
-```
-
-### Check 4: Semantic Correctness
-
-#### Manual QA Checklist
-
-```
-[ ] Answer is relevant to question
-[ ] Answer is grammatically correct
-[ ] Answer is coherent and well-written
-```
-
-#### Attest Assertions
-
-```python
-from attest import expect
-
-def test_semantic_quality(attest):
-    result = agent.run("question")
-
-    chain = (
-        expect(result)
-        .output_similar_to("expected answer", threshold=0.85)
-        .passes_judge("Is this grammatically correct?")
-        .passes_judge("Is this coherent and helpful?")
-    )
-    attest.evaluate(chain)
-```
-
-## Checklist to Test Suite Conversion
-
-### Step 1: List All Manual Checks
-
-Document what you currently check:
-
-```
-Response Quality:
-  [ ] Contains answer to question
-  [ ] No error messages
-  [ ] Proper capitalization
-
-Performance:
-  [ ] Completes in &lt;5s
-  [ ] Costs <$0.10
-
-Semantic:
-  [ ] Answers the actual question
-  [ ] Grammatically correct
-  [ ] Professional tone
-```
-
-### Step 2: Map to Assertions
-
-Convert each check to an assertion:
-
-```python
-from attest import expect
-
-def test_math_checklist(attest):
-    result = agent.run("What is 2+2?")
-
-    chain = (
-        expect(result)
-        # Response Quality
-        .output_contains("4")
-        .output_not_contains("error")
-        .output_matches_regex(r"^[A-Z]")
-        # Performance
-        .latency_under(5000)
-        .cost_under(0.10)
-        # Semantic
-        .output_similar_to("The answer is 4")
-        .passes_judge("Is this grammatically correct?")
-        .passes_judge("Does this sound professional?")
-    )
-    attest.evaluate(chain)
-```
-
-### Step 3: Organize into Test Cases
-
-Group assertions by scenario:
-
-```python
-def test_math_question(attest):
-    """Agent should answer math questions."""
-    result = agent.run("What is 2+2?")
-
-    chain = (
-        expect(result)
-        .output_contains("4")
-        .output_not_contains("error")
-        .latency_under(5000)
-        .cost_under(0.10)
-        .passes_judge("Is the answer correct?")
-    )
-    attest.evaluate(chain)
-
-def test_history_question(attest):
-    """Agent should answer history questions."""
-    result = agent.run("When was the Declaration of Independence?")
-
-    chain = (
-        expect(result)
-        .output_contains("1776")
-        .passes_judge("Is this historically accurate?")
-        .output_similar_to("July 4, 1776")
-    )
-    attest.evaluate(chain)
-```
-
-### Step 4: Run Tests Locally
+Suppose the rule is: "Look up the order and mention its id in the reply."
 
 ```bash
-uv run pytest test_agent.py -v
+uv add "attest-ai>=1.1.0" pytest
 ```
 
-### Step 5: Integrate into CI/CD
-
-Add to GitHub Actions:
-
-```yaml
-name: Agent QA
-
-on: [push, pull_request]
-
-jobs:
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
-      - run: uv sync
-      - run: uv run pytest test_agent.py
-```
-
-## Complete Example
-
-### Manual QA Workflow (Before)
-
-```
-1. Run agent manually in notebook
-2. Read output line by line
-3. Check:
-   - Does it answer the question?
-   - Any errors or warnings?
-   - Is the output grammatical?
-   - How long did it take?
-   - How much did it cost?
-4. Document findings in Google Sheet
-5. Notify team if anything broke
-```
-
-### Automated Test Suite (After)
+Save this complete, no-network example as `test_support.py`:
 
 ```python
-from attest import expect
-import pytest
+from attest import agent, expect
 
-@pytest.fixture
-def agent():
-    from app import create_agent
-    return create_agent()
 
-@pytest.mark.parametrize("question,expected", [
-    ("What is the capital of France?", "Paris"),
-    ("When was WWII?", "1939-1945"),
-    ("Who is the President of the US?", "Biden")
-])
-def test_factual_questions(attest, agent, question, expected):
-    """Test agent on factual questions."""
-    result = agent.run(question)
+@agent("support")
+def support(builder):
+    builder.add_tool_call("lookup_order", args={"order_id": "O-1"}, result={"status": "delivered"})
+    return {"message": "Order O-1 was delivered."}
 
-    chain = (
-        expect(result)
-        .output_contains(expected)
-        .output_not_contains("error")
-        .latency_under(5000)
-        .cost_under(0.10)
-        .passes_judge("Is this factually correct?")
-    )
-    attest.evaluate(chain)
 
-def test_response_quality(attest, agent):
-    """Test response quality metrics."""
-    result = agent.run("What is 2+2?")
-
-    chain = (
-        expect(result)
-        .output_matches_regex(r"\S")
-        .passes_judge("Is this grammatically correct?")
-        .passes_judge("Is this professionally written?")
-    )
-    attest.evaluate(chain)
-
-def test_performance(attest, agent):
-    """Test performance constraints."""
-    result = agent.run("complex question")
-
-    attest.evaluate(expect(result).latency_under(5000).cost_under(0.25))
+def test_order_lookup(attest):
+    attest.evaluate(expect(support()).required_tools(["lookup_order"]).output_contains("O-1"))
 ```
 
-Run it:
+Run `uv run pytest`. For your application, instrument the real agent with a [framework adapter](/sdk-guides/framework-adapters/) or record calls explicitly on the builder. The decorator alone does not intercept every operation.
 
-```bash
-uv run pytest test_agent.py -v
-```
+## Translate the rest deliberately
 
-Output:
+| Checklist item | Check | Evidence needed |
+|---|---|---|
+| Required fields and types | JSON Schema assertion | Structured output |
+| Required or forbidden text | Content assertion | Reply text |
+| Response time or spend limit | Constraint assertion | Actual timing and usage metadata |
+| Tool order or at-most-once per order | Behavior contract | Tool names, arguments and ordering |
+| Refund total or notification recipient | World-effect contract | Isolated final state and related records |
+| Helpful, clear or other subjective quality | Calibrated judge | A rubric and the evidence needed to score it |
 
-```
-test_agent.py::test_factual_questions[Paris] PASSED
-test_agent.py::test_factual_questions[1939-1945] PASSED
-test_agent.py::test_factual_questions[Biden] PASSED
-test_agent.py::test_response_quality PASSED
-test_agent.py::test_performance PASSED
+Choose latency and spend limits from your application's requirements. A text check cannot prove a payment happened exactly once: test the ledger too. The [tour](/tour/) illustrates that distinction.
 
-======================== 5 passed in 12.34s ========================
-```
+## Make failures visible
 
-## Benefits
+Evaluate every assertion chain, including after adding more assertions. Use [capture and replay](/sdk-guides/capture/) to preserve an incident as a reviewed regression fixture; control external tools and test isolation as well as model responses.
 
-### 1. Consistency
+A missing provider or malformed judge reply is `not_evaluated`, not a pass. The [policy](/sdk-guides/policies/) defaults to warning on that result; use `not_evaluated: block` for required measurements and require the gate in branch protection. Review [verdicts](/sdk-guides/verdicts/) before aggregating repeated trials.
 
-Same checks every run, no human error:
-
-```python
-# This always passes or fails consistently
-attest.evaluate(expect(result).output_contains("hello"))
-```
-
-### 2. Speed
-
-Run full QA in seconds instead of hours:
-
-```bash
-# Runs 100 test cases in &lt;60s
-uv run pytest test_agent.py --tb=short
-```
-
-### 3. Regression Detection
-
-Fail immediately if quality drops:
-
-```python
-# Catches unexpected changes
-chain = (
-    expect(result)
-    .cost_under(0.10)       # Fails if cost increased
-    .latency_under(5000)    # Fails if agent is slow
-)
-attest.evaluate(chain)
-```
-
-### 4. Documentation
-
-Tests serve as specification:
-
-```python
-def test_agent_responds_to_math(attest):
-    """Agent should correctly answer math questions."""
-    result = agent.run("What is 2+2?")
-    attest.evaluate(expect(result).output_contains("4"))
-```
-
-## FAQ
-
-**How do I migrate an existing QA spreadsheet?**
-
-1. Export checklist items from your spreadsheet
-2. Map each item to an assertion
-3. Organize into test functions
-4. Run `uv run pytest` to validate
-
-**What about edge cases I haven't tested?**
-
-Add them as you find them:
-
-```python
-def test_edge_case_empty_input(attest, agent):
-    """Agent should handle empty input gracefully."""
-    result = agent.run("")
-    attest.evaluate(expect(result).output_not_contains("error"))
-```
-
-**Can I test in the cloud?**
-
-Yes, run `uv run pytest` in CI/CD. Attest works everywhere Python runs.
-
-**How do I monitor quality over time?**
-
-Check CI logs to see pass rates by date. For dashboards, integrate with your monitoring platform.
-
-## Related
-
-- **[Expect DSL Reference](/reference/python/expect-dsl/)** — All assertion methods
-- **[Quickstart](/getting-started/quickstart/)** — Quick start guide
-- **[Migration from PromptFoo](/migration/from-promptfoo/)** — Migrate from another framework
+Continue with [Python setup](/getting-started/python/), [TypeScript setup](/getting-started/typescript/), [behavior contracts](/sdk-guides/behavior-contracts/) and [world fixtures](/sdk-guides/world-fixtures/).

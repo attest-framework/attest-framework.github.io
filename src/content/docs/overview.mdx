@@ -1,105 +1,87 @@
 ---
 title: Overview
-description: What Attest Framework is, why it exists, and how it works.
+description: What Attest tests, how to start and which features are stable, beta or experimental.
 ---
 
 import LayerTable from '@components/LayerTable.astro';
 import AdapterTable from '@components/AdapterTable.astro';
 
-Attest is a testing framework for AI agents. It provides six evaluated assertion layers plus plugins, ordered so that free deterministic checks run first and LLM-based evaluation runs only when needed.
+Attest 1.1.0 "Hardened" tests AI agents with pytest and Vitest. It checks what an agent says, which tools and agents it calls, and what it changes in an external system. Record model responses once and replay them against your real code to test changes without live model calls for matching requests.
 
-## The Problem
+## One small test
 
-Testing AI agents is different from testing traditional software:
-
-- **Non-deterministic outputs** — The same input produces different outputs across runs
-- **Multi-step behavior** — Agents make sequences of decisions (tool calls, API calls, delegations)
-- **Cost per test** — LLM-as-judge evaluation costs money on every run
-- **Framework fragmentation** — Teams use OpenAI, LangChain, CrewAI, Google ADK — each with different tracing formats
-
-Output checks, behavior contracts and model judges answer different questions. Attest orders its checks so that deterministic assertions can run before a model judge is used for subjective criteria.
-
-## How It Works
-
-### 1. Instrument your agent
-
-Use one of the adapters listed below (or the `@agent` decorator) to capture execution traces:
+Install with `uv add "attest-ai>=1.1.0" pytest`, save this as `test_support.py` and run `uv run pytest`:
 
 ```python
-from attest import agent
+from attest import agent, expect
 
-@agent("my-agent")
-def my_agent(builder, query: str) -> dict:
-    # Your agent logic — record tool calls, LLM calls, delegations on the builder
-    builder.add_tool_call("calculator", args={"expression": "2+2"}, result={"value": 4})
-    return {"message": "4"}
+
+@agent("support")
+def support(builder):
+    builder.add_tool_call("lookup_order", args={"order_id": "O-1"}, result={"status": "delivered"})
+    return {"message": "Order O-1 was delivered."}
+
+
+def test_checks_the_reply_and_tool(attest):
+    attest.evaluate(expect(support()).required_tools(["lookup_order"]).output_contains("O-1"))
 ```
 
-### 2. Write assertions with the `expect()` DSL
+This records sample data and makes no network calls. For your application, record real execution with an adapter or capture, then choose checks for your business rules. A recording consistent with its own trace is not proof that the behavior is correct.
 
-```python
-from attest import expect
+## Record, replay, gate
 
-def test_my_agent(attest):
-    result = my_agent(query="What's 2+2?")
+1. **Capture** a run and review its redacted data and drafted contracts.
+2. **Replay** recorded model responses while the current agent code runs. Strict replay reports a mismatch instead of inventing a response; isolate tools and time-dependent state too.
+3. **Gate** the result with policies and reviewed baselines. Failed native tests block by default; `not_evaluated` only warns unless you configure `not_evaluated: block`. Require the policy check in branch protection.
 
-    chain = (
-        expect(result)
-        .output_contains("4")                            # L4, free
-        .required_tools(["calculator"])                  # L3, free
-        .passes_judge("mathematically correct")          # L6, cost depends on the judge provider
-    )
-    attest.evaluate(chain)
-```
+The [tour](/tour/) shows this workflow on a synthetic double refund. The [1.1 release post](/blog/v110-release/) explains evaluated-chain enforcement, relational effects, scheme-2 assertion ids, baseline removals and judge failure handling.
 
-### 3. Run with pytest (Python) or vitest (TypeScript)
+## Capabilities and maturity
 
-```bash
-# Python
-pytest test_agent.py -v
+These tiers match the 1.1.0 engine's capability inventory. **Stable** features have parity and conformance coverage; behavior changes are breaking changes. **Beta** features are shipped and tested but may change in a minor release. **Experimental** features have no stability commitment and may change or be removed in any release.
 
-# TypeScript
-npx vitest run
-```
+| Capability | Tier | Start here |
+|---|---|---|
+| Capture, replay and merge gate | stable | [Capture](/sdk-guides/capture/), [replay](/sdk-guides/replay/), [merge gate](/sdk-guides/merge-gate/) |
+| Behavior and world-effect contracts | stable | [Behavior rules](/sdk-guides/behavior-contracts/), [world fixtures and relational effects](/sdk-guides/world-fixtures/) |
+| CI policy, baselines and reports | stable | [Policies](/sdk-guides/policies/), [baselines](/sdk-guides/baselines/), [annotations](/sdk-guides/annotations/), [selection](/sdk-guides/selection/), [CLI](/sdk-guides/cli/) |
+| Failure viewer | beta | [Viewer](/sdk-guides/viewer/) |
+| Mutation testing | beta | [Mutation](/sdk-guides/mutation/) |
+| MCP server and agent skills | beta | [MCP](/sdk-guides/mcp/), [agent setup](/sdk-guides/agents/) |
+| LLM judges on four provider families | beta | [Judges and calibration](/sdk-guides/judges/) |
+| Multi-agent trace trees | beta | [Multi-agent testing](/sdk-guides/multi-agent/) |
+| Simulation runtime | beta | [Simulation](/sdk-guides/simulation/), [statistical verdicts](/sdk-guides/statistical-verdicts/) |
+| Plugin assertions | beta | [Plugins](/sdk-guides/plugins/) |
+| Local ONNX embeddings | experimental | [Configuration](/sdk-guides/configuration/) |
+| Continuous evaluation and drift detection | experimental | [Continuous evaluation](/sdk-guides/continuous-eval/) |
 
-## Key Features
+[Trace checking](/sdk-guides/trace-check/) helps inspect missing evidence before testing. [Verdicts](/sdk-guides/verdicts/) explains pass, fail and not-evaluated results; [SDK parity](/sdk-guides/parity/) describes Python and TypeScript coverage.
 
-- **Six evaluated layers plus plugins** — see the layer table below
-- **Framework adapters** — see the adapter table below
-- **Multi-agent trace trees** — Test delegation chains, cross-agent assertions, temporal ordering
-- **Simulation mode** — Run tests without API calls using mock tools and personas
-- **Continuous evaluation** — Sample production traces and run assertions with alerting
-- **Drift detection** — Monitor agent behavior changes over time
-- **Cost tracking** — Per-assertion cost metrics with tier budgets
-- **Plugin system** — Extend with custom evaluation logic via entry points
+## Checks and providers
 
-### Layers
+Free deterministic checks run before embedding and judge checks. Embedding and judge cost depends on the selected provider: OpenAI embeddings and hosted judges may cost money; local ONNX embeddings or a local judge endpoint avoid those provider API charges. ACP judges are local-only and unsandboxed; read the safety guidance before using one. Plugins define their own cost and determinism.
 
 <LayerTable />
 
-### Adapters
+## Adapters
+
+Adapters normalize provider responses or framework runs into traces. Availability and maturity differ by language:
 
 <AdapterTable />
 
-## Architecture
+## Install and runtime
 
-Attest uses a **subprocess architecture**: a Go engine handles assertion evaluation while SDKs (Python, TypeScript) handle instrumentation and the developer API.
+```bash
+# Python
+uv add "attest-ai>=1.1.0" pytest
+uv run attest doctor
 
+# TypeScript
+npm install -D "@attest-ai/core@>=1.1.0" "@attest-ai/vitest@>=1.1.0" "vitest@^4"
+npx attest doctor
+npx vitest run
 ```
-┌─────────────┐     JSON-RPC 2.0      ┌──────────────┐
-│  Python SDK  │ ◄──── NDJSON/stdio ───► │  Go Engine   │
-│  or TS SDK   │                        │  (subprocess) │
-└─────────────┘                        └──────────────┘
-```
 
-The engine is a single static binary — no runtime dependencies, no containers. SDKs auto-download the correct version on first run.
+For TypeScript, run `npx attest doctor` before the first test: downloading the engine on a cold machine can exceed Vitest's default timeout. The Vitest integration supports versions 3, 4 and 5; see the release notes for concurrent lifecycle limitations.
 
-## Version
-
-Current stable release: **1.1.0 "Hardened"** (SDK and engine). Each SDK requires an engine of the same version.
-
-| Package | Registry | Install |
-|---------|----------|---------|
-| `attest-ai` | PyPI | `uv add "attest-ai==1.1.0"` |
-| `@attest-ai/core` | npm | `npm install -D "@attest-ai/core@1.1.0"` |
-| `@attest-ai/vitest` | npm | `npm install -D "@attest-ai/vitest@1.1.0"` |
+The SDK starts a Go engine subprocess and communicates over JSON-RPC/NDJSON. Published SDK packages download the matching engine version and verify its pinned hash. Source/editable installs require a local engine build and `ATTEST_ENGINE_PATH`. Optional local ONNX embeddings also need ONNX Runtime. See [configuration](/sdk-guides/configuration/) for details.

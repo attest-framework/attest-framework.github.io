@@ -1,365 +1,41 @@
 ---
 title: "Migrating from DeepEval"
-description: "Move from DeepEval to Attest for more powerful, composable agent testing."
+description: "Move selected checks into Attest without assuming metrics are interchangeable."
 ---
 
-Move from DeepEval to Attest for more powerful, composable agent testing.
+Move a test case at a time, keeping the same inputs and expected behavior. Attest 1.1.0 runs assertions inside pytest or Vitest; its judges and embedding scores are not drop-in replacements for another tool's metrics. Recheck thresholds against labeled examples rather than copying score cutoffs.
 
-## Why Migrate?
+## Start with a deterministic requirement
 
-DeepEval focuses on metric evaluation. Attest provides:
-
-- **Composable assertions** — Chain validations fluently
-- **Six evaluated layers plus plugins** — From schema to LLM judge
-- **Trace inspection** — See exactly what your agent did
-- **Multi-agent testing** — Built-in simulation runtime
-- **Framework adapters** — LangChain, CrewAI, LlamaIndex, more
-
-## Concept Mapping
-
-| DeepEval | Attest | Notes |
-|----------|--------|-------|
-| `Metric` | Assertion method | e.g., `output_contains()` |
-| `evaluate()` | `expect()` + `attest.evaluate()` | Build a chain, then evaluate it with the `attest` fixture |
-| `Faithfulness` | `passes_judge()` | LLM evaluation |
-| `AnswerRelevancy` | `output_similar_to()` | Embedding-based |
-| `RAGAS` | Assertion layers | Comprehensive validation |
-| `DeepEvalConfig` | `config` module | Global configuration |
-
-## Step-by-Step Migration
-
-### 1. Replace Metric with Expect
-
-#### DeepEval
-
-```python
-from deepeval.metrics import Faithfulness
-
-metric = Faithfulness()
-result = metric.measure(
-    output="The sky is blue",
-    context="The sky appears blue due to scattering"
-)
-print(result.score)
+```bash
+uv add "attest-ai>=1.1.0" pytest
 ```
 
-#### Attest
+This complete pytest example checks a known phrase without a provider call:
 
 ```python
-from attest import expect
+from attest import TraceBuilder, expect
 
-def test_sky_answer(attest):
-    result = agent.run("What color is the sky?")
 
-    # Use LLM judge instead
-    attest.evaluate(expect(result).passes_judge("Is the answer faithful to facts?"))
+def test_answer_mentions_scattering(attest):
+    trace = TraceBuilder("science").set_output(message="The sky looks blue because of scattering.").build()
+    attest.evaluate(expect(trace).output_contains("scattering"))
 ```
 
-### 2. Replace evaluate() with expect()
+Save it as `test_science.py` and run `uv run pytest`. In your application, replace the sample trace with one from your agent or [adapter](/sdk-guides/framework-adapters/).
 
-#### DeepEval
+## Translate the intent, not the metric name
 
-```python
-from deepeval import evaluate
-from deepeval.metrics import Faithfulness, AnswerRelevancy
+| Requirement | Attest check | Limit |
+|---|---|---|
+| Required phrase or pattern | `output_contains`, `output_matches_regex` | Text matching does not establish factual correctness. |
+| Structured result | `output_matches_schema` | Checks the output's structured field against JSON Schema. |
+| Similarity to a reference | `output_similar_to` | Semantic similarity is not answer relevance or evidence-grounded faithfulness. |
+| Subjective criterion | `passes_judge` | Choose a rubric and calibrate the configured provider/model. |
+| Tool behavior or external effects | Behavior and world-effect contracts | Requires traces and world-state evidence, not only a reply string. |
 
-metrics = [
-    Faithfulness(model="gpt-4o"),
-    AnswerRelevancy(model="gpt-4o")
-]
+Preserve retrieval context and other evidence needed by your criteria. A generic judge prompt is not an automatic replacement for a retrieval-aware metric. See [judges](/sdk-guides/judges/) for provider setup, costs and calibration.
 
-results = evaluate(
-    test_cases=test_cases,
-    metrics=metrics
-)
+Always evaluate the chain: building `expect(...)` alone checks nothing and fails under the 1.1.0 pytest guard. Missing measurements are `not_evaluated`; they are not passes. Review [verdicts](/sdk-guides/verdicts/) and choose a [policy](/sdk-guides/policies/), including `not_evaluated: block` if required.
 
-print(f"Pass rate: {results.get_pass_rate()}")
-```
-
-#### Attest
-
-```python
-import pytest
-from attest import expect
-
-@pytest.mark.parametrize("test_case", test_cases)
-def test_agent_answers(attest, test_case):
-    result = agent.run(test_case.input)
-
-    chain = (
-        expect(result)
-        .passes_judge("Is this faithful to facts?")
-        .passes_judge("Is this relevant to the question?")
-        .output_not_contains("error")
-    )
-    attest.evaluate(chain)
-```
-
-### 3. Migrate RAGAS Evaluation
-
-DeepEval's RAGAS metrics map to Attest's assertion layers:
-
-#### DeepEval (RAGAS)
-
-```python
-from deepeval.metrics import RAGAS
-
-metric = RAGAS(
-    model="gpt-4o",
-    include_harmfulness=True,
-    include_maliciousness=False
-)
-
-result = metric.measure(
-    output="The answer",
-    retrieval_context=["context"],
-    expected_output="Expected answer"
-)
-```
-
-#### Attest
-
-```python
-from attest import expect
-
-def test_rag_answer(attest):
-    result = rag_agent.run("question")
-
-    chain = (
-        expect(result)
-        # Layer 1: Schema
-        .output_matches_schema({"type": "object", "required": ["message"]})
-        # Layer 2: Constraints
-        .cost_under(0.10)
-        # Layer 3: Trace
-        .required_tools(["retrieval"])
-        # Layer 4: Content
-        .output_contains("key fact")
-        # Layer 5: Embedding
-        .output_similar_to("expected answer")
-        # Layer 6: Judge
-        .passes_judge("Is this harmful?")
-        # Trace tree assertions (layer 3)
-        .delegation_depth(3)
-    )
-    attest.evaluate(chain)
-```
-
-### 4. Replace TestCase with Direct Assertions
-
-#### DeepEval
-
-```python
-from deepeval.test_cases import LLMTestCase
-
-test_cases = [
-    LLMTestCase(
-        input="What is 2+2?",
-        expected_output="4"
-    ),
-    LLMTestCase(
-        input="What is 3+3?",
-        expected_output="6"
-    )
-]
-```
-
-#### Attest
-
-```python
-from attest import expect
-
-import pytest
-
-inputs = [
-    {"question": "What is 2+2?", "expected": "4"},
-    {"question": "What is 3+3?", "expected": "6"}
-]
-
-@pytest.mark.parametrize("test", inputs)
-def test_math_answers(attest, test):
-    result = agent.run(test["question"])
-    attest.evaluate(expect(result).output_contains(test["expected"]))
-```
-
-### 5. Use Adapters Instead of Custom Metrics
-
-#### DeepEval
-
-```python
-from deepeval.metrics import CustomMetric
-
-class MyMetric(CustomMetric):
-    def measure(self, output, **kwargs):
-        # Custom evaluation logic
-        return output.lower().count("good")
-```
-
-#### Attest
-
-```python
-from attest import expect
-
-def test_positive_sentiment(attest):
-    # Use built-in judge
-    result = agent.run("...")
-
-    attest.evaluate(
-        expect(result).passes_judge(
-            "Does this contain positive sentiment?",
-            threshold=0.7,
-            model="gpt-4.1",
-        )
-    )
-
-    # Or register a plugin for complex custom logic
-    attest.evaluate(expect(result).plugin("positive_sentiment", {"min_count": 1}))
-```
-
-## Complete Example
-
-### Before: DeepEval
-
-```python
-from deepeval import evaluate
-from deepeval.metrics import (
-    Faithfulness,
-    AnswerRelevancy,
-    Correctness
-)
-from deepeval.test_cases import LLMTestCase
-
-test_cases = [
-    LLMTestCase(
-        input="What is the capital of France?",
-        expected_output="Paris"
-    ),
-    LLMTestCase(
-        input="What is 2+2?",
-        expected_output="4"
-    )
-]
-
-metrics = [
-    Faithfulness(model="gpt-4o"),
-    AnswerRelevancy(model="gpt-4o"),
-    Correctness(model="gpt-4o")
-]
-
-results = evaluate(test_cases, metrics)
-print(f"Pass rate: {results.get_pass_rate()}")
-```
-
-### After: Attest
-
-```python
-import pytest
-from attest import expect
-
-test_cases = [
-    {"question": "What is the capital of France?", "expected": "Paris"},
-    {"question": "What is 2+2?", "expected": "4"}
-]
-
-@pytest.mark.parametrize("test", test_cases)
-def test_agent_answers(attest, test):
-    result = agent.run(test["question"])
-
-    chain = (
-        expect(result)
-        .output_contains(test["expected"])
-        .passes_judge("Is the answer faithful?", model="gpt-4.1")
-        .passes_judge("Does it answer the question?", model="gpt-4.1")
-        .passes_judge("Is the answer correct?", model="gpt-4.1")
-    )
-    attest.evaluate(chain)
-```
-
-## Benefits of Attest
-
-### 1. Composable Assertions
-
-Stack multiple validations in one fluent chain:
-
-```python
-chain = (
-    expect(result)
-    .output_contains("answer")
-    .cost_under(0.05)
-    .passes_judge("Is correct?")
-)
-attest.evaluate(chain)
-```
-
-### 2. Trace Inspection
-
-See exactly what your agent did:
-
-```python
-chain = expect(result).required_tools(["google_search"]).step_count("lte", 5)
-attest.evaluate(chain)
-```
-
-### 3. Framework Adapters
-
-Built-in support for LangChain, CrewAI, LlamaIndex:
-
-```python
-from attest import AgentResult, LangChainAdapter, expect
-
-adapter = LangChainAdapter(agent_id="research-agent")
-
-with adapter.capture() as handler:
-    agent.invoke({"input": "..."}, config={"callbacks": [handler]})
-
-# Attest captures the trace through the callback handler
-result = AgentResult(trace=adapter.trace)
-attest.evaluate(expect(result).required_tools(["..."]))
-```
-
-### 4. Multi-Agent Testing
-
-Assert on the trace tree of a multi-agent run:
-
-```python
-from attest import expect
-
-def test_multi_agent_run(attest):
-    result = run_pipeline("question")  # your agent calls delegate() to record sub-agents
-
-    chain = (
-        expect(result)
-        .agent_called("researcher")
-        .agent_called("reviewer")
-        .agent_ordered_before("researcher", "reviewer")
-    )
-    attest.evaluate(chain)
-```
-
-## FAQ
-
-**Can I use DeepEval and Attest together?**
-
-Yes, but we recommend migrating completely for consistency. You can gradually migrate test suites one at a time.
-
-**What about RAGAS?**
-
-RAGAS concepts map to Attest's assertion layers. Use `passes_judge()` with custom prompts instead of RAGAS metrics.
-
-**How do I test retrieval quality?**
-
-Use trace inspection to verify retrieval:
-
-```python
-attest.evaluate(expect(result).required_tools(["retrieval"]))
-```
-
-**What about synthetic data generation?**
-
-Attest focuses on assertion. For synthetic data, continue using DeepEval's tools or others.
-
-## Related
-
-- **[Expect DSL Reference](/reference/python/expect-dsl/)** — All assertion methods
-- **[Adapters Reference](/reference/python/adapters/)** — Framework integrations
-- **[Writing a Framework Adapter](/tutorials/writing-adapter/)** — Custom adapters
+Use the [Python setup](/getting-started/python/) or [TypeScript setup](/getting-started/typescript/) for project integration. Keep existing evaluations alongside the migrated checks until you understand their disagreements.

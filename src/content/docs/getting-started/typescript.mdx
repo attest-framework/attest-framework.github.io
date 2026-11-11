@@ -12,12 +12,12 @@ import agentTestTs from "../../../examples/quickstart-ts/agent.test.ts?raw";
 Install the core SDK, the Vitest integration and Vitest:
 
 ```bash
-npm install -D "@attest-ai/core@>=1.0.0" "@attest-ai/vitest@>=1.0.0" "vitest@^4"
+npm install -D "@attest-ai/core@>=1.1.0" "@attest-ai/vitest@>=1.1.0" "vitest@^4"
 ```
 
 ## Create an Agent
 
-Use the `agent()` wrapper from `@attest-ai/core`: it records each LLM and tool call on a `TraceBuilder` and returns an `AgentResult`. This is the [`quickstart-ts`](https://github.com/attest-framework/attest-examples/tree/main/quickstart-ts) example from attest-examples:
+Use the `agent()` wrapper from `@attest-ai/core`: it supplies a `TraceBuilder` and returns an `AgentResult`. Your code or adapter records each LLM and tool call; the wrapper does not intercept arbitrary calls automatically. This is the [`quickstart-ts`](https://github.com/attest-framework/attest-examples/tree/main/quickstart-ts) example from attest-examples:
 
 <Code code={agentTs} lang="typescript" title="quickstart-ts/agent.ts" />
 
@@ -27,9 +27,10 @@ Build the assertion chain with `attestExpect` from `@attest-ai/core` and evaluat
 
 <Code code={agentTestTs} lang="typescript" title="quickstart-ts/agent.test.ts" />
 
-Run with:
+Before the first test, download and check the matching engine with `npx attest doctor`. On a cold machine the initial download can exceed Vitest's default five-second test timeout. Then run the suite:
 
 ```bash
+npx attest doctor
 npx vitest run
 ```
 
@@ -37,7 +38,7 @@ npx vitest run
 
 ## Using the TraceBuilder
 
-Build traces manually for custom agent architectures:
+Build traces manually for custom agent architectures. The metadata below is invented sample usage, not a provider price or measured API cost:
 
 ```typescript
 import { AgentResult, TraceBuilder, attestExpect } from "@attest-ai/core";
@@ -63,7 +64,7 @@ it("answers arithmetic", async () => {
 |----------|---------|
 | `OPENAI_API_KEY` | OpenAI API key for judge/embedding assertions |
 | `ATTEST_ENGINE_PATH` | Override engine binary location |
-| `ATTEST_SIMULATION` | Enable simulation mode (no real LLM calls) |
+| `ATTEST_SIMULATION` | Skip embedding and judge provider calls; application calls still need mocks |
 | `ATTEST_JUDGE_PROVIDER` | LLM judge provider: `openai`, `anthropic`, `gemini`, `acp` |
 | `ATTEST_JUDGE_MODEL` | Model for judge assertions (e.g., `gpt-4.1`) |
 

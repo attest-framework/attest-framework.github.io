@@ -136,7 +136,7 @@ export default defineConfig({
           ],
         },
         {
-          label: "Guides",
+          label: "Topic Introductions",
           items: [
             { label: "Framework Adapters", slug: "guides/framework-adapters" },
             { label: "Multi-Agent Testing", slug: "guides/multi-agent" },
@@ -147,7 +147,7 @@ export default defineConfig({
           ],
         },
         ...(hasSyncedGuides
-          ? [{ label: "SDK Guides", autogenerate: { directory: "sdk-guides" } }]
+          ? [{ label: "SDK Guides (All Features)", autogenerate: { directory: "sdk-guides" } }]
           : []),
         {
           label: "Reference",

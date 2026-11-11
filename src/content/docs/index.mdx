@@ -1,9 +1,9 @@
 ---
 title: Attest
-description: Capture a run as a fixture consistent with its recording, replay the agent's real code with recorded model responses, and apply a merge policy to the results.
+description: Test what your AI agent says, which tools it calls and what it changes. Replay recorded model responses and enforce checks in CI.
 template: splash
 hero:
-  tagline: Record the incident once. Replay your agent's real code against recorded model responses. Gate the merge on the checks you chose.
+  tagline: Test what your AI agent says, does and changes. Replay recorded model responses. Check the results before merging.
   image:
     file: ../../assets/logo.svg
   actions:
@@ -25,6 +25,8 @@ import { Card, CardGrid } from '@astrojs/starlight/components';
 import PipelineDiagram from '@components/PipelineDiagram.astro';
 import AdapterTable from '@components/AdapterTable.astro';
 import ComparisonTable from '@components/ComparisonTable.astro';
+
+Attest 1.1.0 is a testing framework for AI agents in Python and TypeScript. Check a reply, a sequence of tool calls or a change to external state with pytest or Vitest. Start with deterministic checks; add a model judge only for criteria those checks cannot express.
 
 ## rec → replay → gate
 
@@ -50,7 +52,7 @@ A support agent refunded a customer twice after a payment timeout. Its output-on
 
 <img src="/demo.gif" alt="Attest demo — the INC-1042 double refund becomes a replayed regression test: incident, capture, replay against recorded model responses" class="demo-gif" loading="lazy" />
 
-The full story — the double-refund ledger, the drafted contracts, the blocked revert PR, mutation scores and the HTML viewer — is on the [tour](/tour/). Every command and output there is copied from the live demo.
+The [tour](/tour/) follows the double-refund ledger, reviewed contracts, a blocked revert PR, mutation scores and the HTML viewer. Its outputs illustrate the synthetic demo; the demo README has the current executable walkthrough.
 
 ```python
 expect(trace).tool_cardinality("issue_refund", per="order_id", at_most=1)
@@ -106,10 +108,7 @@ def test_weather_agent(attest):
     )
     attest.evaluate(chain)
 ```
-Save this as `test_weather_agent.py`, install `attest-ai==1.1.0rc5` and `pytest`
-with `uv add`, then run `uv run pytest -v`. Every assertion above is deterministic
-and requires no API key. For semantic checks, add `output_similar_to` or
-`passes_judge` after configuring the corresponding embedding or judge provider.
+Save this as `test_weather_agent.py`, install with `uv add "attest-ai>=1.1.0" pytest`, then run `uv run pytest -v`. Every assertion above is deterministic and requires no API key. For semantic checks, add `output_similar_to` or `passes_judge` after configuring the corresponding embedding or judge provider.
 
 
 ### TypeScript
@@ -117,11 +116,15 @@ and requires no API key. For semantic checks, add `output_similar_to` or
 ```typescript
 import { agent, attestExpect } from '@attest-ai/core';
 import { evaluate } from '@attest-ai/vitest';
+import { test } from 'vitest';
 
-const weatherAgent = agent('weather-agent', (builder, args) => {
-  // Your agent implementation: record tool calls on the builder
-  builder.addToolCall('get_weather', { args: { city: 'Tokyo' } });
-  return { message: '...' };
+const weatherAgent = agent('weather-agent', (builder) => {
+  // Sample data: no model or weather API is called.
+  builder.addToolCall('get_weather', {
+    args: { city: 'Tokyo' },
+    result: { temperature_c: 22, conditions: 'Sunny' },
+  });
+  return { message: 'Current weather conditions in Tokyo: sunny, 22°C.' };
 });
 
 test('weather agent returns weather data', async () => {
@@ -130,12 +133,13 @@ test('weather agent returns weather data', async () => {
   const chain = attestExpect(result)
     .requiredTools(['get_weather'])                               // Layer 3: Free
     .outputContains('Tokyo')                                      // Layer 4: Free
-    .outputSimilarTo('Current weather conditions in Tokyo')       // Layer 5: cost depends on the embedding provider
-    .passesJudge('Provides accurate, helpful weather information'); // Layer 6: cost depends on the judge provider
+    .outputNotContains('error');                                 // Layer 4: Free
 
   await evaluate(chain);
 });
 ```
+
+Save as `weather.test.ts` and install with `npm install -D "@attest-ai/core@>=1.1.0" "@attest-ai/vitest@>=1.1.0" "vitest@^4"`. Run `npx attest doctor` once to download and check the engine before `npx vitest run`: a cold first download can exceed Vitest's default timeout. This test makes no provider calls.
 
 ## Features
 
@@ -144,15 +148,17 @@ test('weather agent returns weather data', async () => {
     Provider and framework adapters for Python and TypeScript, each with a maturity tier - the table below lists them.
   </Card>
   <Card title="Multi-Agent Testing" icon="seti:git">
-    Trace delegation chains across agents. Assert on parent-child relationships, temporal ordering, and cross-agent data flow.
+    Beta: trace delegation chains and check parent-child relationships, ordering and cross-agent data flow.
   </Card>
   <Card title="Simulation Mode" icon="rocket">
-    Test without API calls. Mock tools, inject faults, simulate adversarial users - all deterministic and free.
+    Beta: use mock tools, seeded faults and user personas. Your application's own network calls still need mocks or replay.
   </Card>
   <Card title="Continuous Evaluation" icon="approve-check-circle">
-    Run assertions on production traces. Sample, evaluate, and alert on drift - Slack, webhooks, custom dispatchers.
+    Experimental: sample application traces and alert on hard failures or score drift through Slack or webhooks.
   </Card>
 </CardGrid>
+
+Stable workflows include [capture](/sdk-guides/capture/), [strict replay](/sdk-guides/replay/), [behavior contracts](/sdk-guides/behavior-contracts/), [world effects](/sdk-guides/world-fixtures/) and [CI policies and baselines](/sdk-guides/merge-gate/). The [overview](/overview/#capabilities-and-maturity) links every feature and its maturity tier.
 
 <AdapterTable />
 
@@ -164,10 +170,11 @@ test('weather agent returns weather data', async () => {
 
 ```bash
 # Python
-uv add "attest-ai==1.1.0"
+uv add "attest-ai>=1.1.0" pytest
 
 # TypeScript
-npm install -D "@attest-ai/core@1.1.0" "@attest-ai/vitest@1.1.0" "vitest@^4"
+npm install -D "@attest-ai/core@>=1.1.0" "@attest-ai/vitest@>=1.1.0" "vitest@^4"
+npx attest doctor
 ```
 
 Check the [Python quickstart](/getting-started/python/) or [TypeScript quickstart](/getting-started/typescript/) for a complete walkthrough.
