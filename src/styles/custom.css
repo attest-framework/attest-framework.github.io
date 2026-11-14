@@ -197,11 +197,14 @@ header.header {
   border-color: var(--replay-play);
 }
 
-/* Homepage demo recording */
-.demo-gif {
+/* Homepage demo video */
+.demo-video {
   display: block;
   width: 100%;
+  height: auto;
+  aspect-ratio: 16 / 9;
   margin: 2rem auto;
+  background: #15161a;
   border: 1px solid var(--replay-border);
   border-radius: 10px;
 }
