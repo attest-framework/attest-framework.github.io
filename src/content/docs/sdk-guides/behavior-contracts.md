@@ -110,6 +110,20 @@ The contracts above read the trace. Effect contracts read what the agent did to 
 
 The contract grammar stays closed. A statement still takes only literals; `related(...)` is the one call it accepts inside an argument, and only as the `at_most=` keyword of `sum` or the third argument of `matches`. Inside a list or a map, with a positional `on`, with a non-literal name, as the value of any other argument (`count(..., equals=related(...))`), or combined with an operator (`related(...) + 1`), it is rejected with a position, for example `calls are not allowed in arguments (position 48)`. [MCP](/sdk-guides/mcp/#contract-statements) `run_contract` and `draft_contract` accept and draft these statements; the lines they return are the ones pasted into a test.
 
+### Pair every must-fail case with a must-pass near miss
+
+A contract tested only against bad runs can be too strict and still look right: `count("refunds", at_most=1, order_id="O-2077")` catches a double refund, and also rejects two valid partial refunds on one order. Keep a valid run that looks like the bad one next to each incident, and require the contracts to pass on it. Refund Desk's [INC-1077 retry fixture](https://github.com/attest-framework/refund-desk#near-miss-partial-refunds-with-a-retry) has two partial refunds on one order and a refund request that commits and then times out. Its contracts check each key against its own amount instead of limiting the number of refunds:
+
+```python
+effects = expect(trace).world(snapshot)
+effects.count("refunds", equals=2, order_id="O-2077")
+effects.count("refunds", equals=1, order_id="O-2077", idempotency_key="a734c51152a3b7a0", amount_cents=1200)
+effects.count("refunds", equals=1, order_id="O-2077", idempotency_key="f7edd604c8cce4ac", amount_cents=11400)
+effects.sum("refunds", "amount_cents", at_most=related("orders", "amount_cents", on="order_id"))
+```
+
+These pass on the near miss and fail when the retry replaces the second refund or adds a third, under the same key or a fresh one.
+
 ## What the contracts see
 
 - **Tool calls only.** Contracts read `tool_call` steps. Model calls, retrievals and agent calls between them do not affect a trajectory, an ordering rule or a cycle. The six original trace checks (`tools_called_in_order`, `tools_called_exactly`, `no_tool_loops`, `no_duplicate_tools`, `required_tools`, `forbidden_tools`) still match steps of every type by name.
